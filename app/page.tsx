@@ -4,7 +4,7 @@
 import{useEffect,useState}from"react";
 import type{Film,MissingField}from"../src/domain/film";
 import{compareLibraries}from"../src/domain/compare";
-import{buildOfficialImports}from"../src/domain/sync";
+import{buildOfficialImports,syncKey}from"../src/domain/sync";
 import{isAndroid,letterboxdImportTarget}from"../src/platform/letterboxd-browser";
 
 const icons:Record<string,React.ReactNode>={
@@ -28,24 +28,27 @@ export default function Home(){
  const[sc,setSc]=useState(""),[lb,setLb]=useState(""),[loading,setLoading]=useState(false);
  const[lastSync,setLastSync]=useState<string|null>(null),[sheet,setSheet]=useState<Film|null>(null);
  const[error,setError]=useState(""),[notice,setNotice]=useState(""),[importReady,setImportReady]=useState(false);
+ const[androidApp,setAndroidApp]=useState(false);
 
  useEffect(()=>{const schema=localStorage.getItem("reviewonce-schema");if(schema!=="2"){["senssync-films","senssync-last"].forEach(key=>localStorage.removeItem(key));localStorage.setItem("reviewonce-schema","2")}const raw=localStorage.getItem("senssync-films"),last=localStorage.getItem("senssync-last"),savedSc=localStorage.getItem("senssync-sc"),savedLb=localStorage.getItem("senssync-lb");if(raw){const saved:Film[]=JSON.parse(raw);setFilms(saved);setSelected(saved.filter(isSelectable).map(film=>film.id))}if(last)setLastSync(last);if(savedSc)setSc(savedSc);if(savedLb)setLb(savedLb)},[]);
+ useEffect(()=>{setAndroidApp(/ReviewOnceAndroid\//i.test(navigator.userAgent))},[]);
  useEffect(()=>{if(films.length)localStorage.setItem("senssync-films",JSON.stringify(films))},[films]);
 
  const selectable=films.filter(isSelectable),choice=films.filter(needsChoice),complete=films.filter(film=>film.match==="complete");
  const selectedSet=new Set(selected),selectedFilms=selectable.filter(film=>selectedSet.has(film.id));
 
+ function nativeCollection(){return new Promise<Film[]>((resolve,reject)=>{const nativeWindow=window as typeof window&{__reviewOnceReceiveCollection?:(payload:string)=>void};const timeout=window.setTimeout(()=>{delete nativeWindow.__reviewOnceReceiveCollection;reject(Error("La collection locale n’a pas répondu."))},10000);nativeWindow.__reviewOnceReceiveCollection=(payload:string)=>{window.clearTimeout(timeout);delete nativeWindow.__reviewOnceReceiveCollection;try{resolve(JSON.parse(payload) as Film[])}catch{reject(Error("La collection locale est illisible."))}};window.open("reviewonce://collection","_self")})}
+
  async function refresh(){
   if(!sc.trim()||!lb.trim()){setError("Renseigne tes deux profils dans les réglages.");setScreen("settings");return}
   setLoading(true);setError("");setNotice("");setImportReady(false);
   try{
-   const nonce=Date.now(),[sr,lr]=await Promise.all([
-    fetch(`/api/senscritique?username=${encodeURIComponent(sc)}&refresh=1&_t=${nonce}`,{cache:"no-store"}),
-    fetch(`/api/letterboxd?username=${encodeURIComponent(lb)}&_t=${nonce}`,{cache:"no-store"})
-   ]);
-   const sd=await sr.json(),ld=await lr.json();
+   const nonce=Date.now(),srPromise=fetch(`/api/senscritique?username=${encodeURIComponent(sc)}&refresh=1&_t=${nonce}`,{cache:"no-store"});
+   const [sr,localMovies,lr]=androidApp?await Promise.all([srPromise,nativeCollection(),Promise.resolve(null)]):await Promise.all([srPromise,Promise.resolve(null),fetch(`/api/letterboxd?username=${encodeURIComponent(lb)}&_t=${nonce}`,{cache:"no-store"})]);
+   const sd=await sr.json(),ld=lr?await lr.json():{movies:localMovies||[],limited:false};
    if(!sr.ok)throw Error(sd.error||"SensCritique est momentanément inaccessible.");
-   if(!lr.ok)throw Error(ld.error||"Letterboxd est momentanément inaccessible.");
+   if(lr&&!lr.ok)throw Error(ld.error||"Letterboxd est momentanément inaccessible.");
+   if(androidApp&&!ld.movies.length)throw Error("Actualise d’abord ta collection Letterboxd avec le bouton de l’application.");
    const source:Film[]=ld.limited?sd.movies.filter((film:Film)=>film.watchedDate&&film.watchedDate>=ld.coverageFrom):sd.movies;
    const compared=compareLibraries(source,ld.movies,films,Boolean(ld.limited));
    setFilms(compared);setSelected(compared.filter(isSelectable).map(film=>film.id));
@@ -80,6 +83,24 @@ export default function Home(){
   }catch(e){setError(e instanceof Error?e.message:"L’import n’a pas pu être préparé.")}finally{setLoading(false)}
  }
 
+ async function prepareAndroidSync(){
+  if(!selectedFilms.length){setError("Sélectionne au moins un film à synchroniser.");return}
+  setLoading(true);setError("");
+  try{
+   const hydrated=[...selectedFilms];
+   for(let index=0;index<hydrated.length;index++){
+    const film=hydrated[index];
+    if(film.missing?.includes("review")&&film.review==="present"&&film.reviewUrl){
+     const response=await fetch(`/api/senscritique/review?path=${encodeURIComponent(film.reviewUrl)}`),data=await response.json();
+     if(!response.ok)throw Error(data.error||`La critique de ${film.title} n’a pas pu être récupérée.`);
+     hydrated[index]={...film,review:data.review||""};
+    }
+   }
+   localStorage.setItem("reviewonce-android-payload",JSON.stringify({version:1,actions:hydrated.map(film=>({key:syncKey(film),tmdbId:film.tmdbId,title:film.title,rating10:film.rating,watchedDate:film.watchedDate,review:film.review,missing:film.missing||[],watchlist:Boolean(film.wished)}))}));
+   window.open("reviewonce://sync","_self");
+  }catch(e){setError(e instanceof Error?e.message:"La synchronisation n’a pas pu être préparée.")}finally{setLoading(false)}
+ }
+
  function openLetterboxdImport(){
   const target=letterboxdImportTarget(navigator.userAgent);
   if(isAndroid(navigator.userAgent))window.location.href=target;
@@ -102,7 +123,7 @@ export default function Home(){
      {!films.length?<div className="emptyState"><div><Icon name="sync" size={28}/></div><h2>Trouve les films à importer</h2><p>ReviewOnce compare tes deux profils et prépare uniquement ce qu’il reste à ajouter.</p><button onClick={refresh}>Comparer mes profils</button></div>:!selectable.length&&!choice.length?<div className="emptyState compact"><div><Icon name="check" size={28}/></div><h2>Tout est à jour</h2><p>Aucun nouveau film à importer pour le moment.</p></div>:selectable.map(film=><article className={`film selectableFilm ${selectedSet.has(film.id)?"selected":""}`} key={film.id}><label className="filmCheckbox" aria-label={`Sélectionner ${film.title}`}><input type="checkbox" checked={selectedSet.has(film.id)} onChange={()=>toggleFilm(film.id)}/><span><Icon name="check" size={15}/></span></label><div className="poster">{film.poster?<img src={film.poster} alt=""/>:<span>{film.title[0]}</span>}</div><div className="filmMain"><h2>{film.title}</h2><p>{film.year}{film.watchedDate&&` · ${new Date(film.watchedDate+"T12:00").toLocaleDateString("fr-FR",{day:"numeric",month:"short"})}`}</p><div className="missingFields">{film.missing?.map(field=><span key={field}>{fieldLabel(field)}</span>)}</div></div></article>)}
      {choice.length>0&&<><div className="listSectionTitle"><strong>{choice.length} film{choice.length>1?"s":""} à choisir</strong><span>Indique le bon film avant de l’importer.</span></div>{choice.map(film=><article className="film" key={film.id}><div className="poster">{film.poster?<img src={film.poster} alt=""/>:<span>{film.title[0]}</span>}</div><div className="filmMain"><h2>{film.title}</h2><p>{film.year}</p><span className="match review">Choisir le film</span></div><button className="more" onClick={()=>setSheet(film)} aria-label={`Choisir ${film.title}`}><Icon name="chevron"/></button></article>)}</>}
     </section>
-    {selectedFilms.length>0&&<div className="actionDock"><div><strong>{selectedFilms.length} film{selectedFilms.length>1?"s":""}</strong><span>Notes, dates et critiques incluses</span></div><button onClick={prepareOfficialImport} disabled={loading}>{loading?"Préparation…":`Importer ${selectedFilms.length}`} <Icon name="chevron" size={17}/></button></div>}
+    {selectedFilms.length>0&&<div className="actionDock"><div><strong>{selectedFilms.length} film{selectedFilms.length>1?"s":""}</strong><span>Notes, dates et critiques incluses</span></div><button onClick={androidApp?prepareAndroidSync:prepareOfficialImport} disabled={loading}>{loading?"Préparation…":androidApp?`Synchroniser ${selectedFilms.length}`:`Importer ${selectedFilms.length}`} <Icon name="chevron" size={17}/></button></div>}
    </>}
    {screen==="history"&&<section className="screen"><div className="titleBlock"><h1>Déjà sur Letterboxd</h1><p>Les films pour lesquels il ne reste rien à ajouter.</p></div><div className="historyCard"><div className="historyIcon"><Icon name="check"/></div><div><strong>{complete.length} film{complete.length>1?"s":""} à jour</strong><span>Aucune action nécessaire</span></div></div>{complete.map(film=><article className="historyRow" key={film.id}><span>{film.title[0]}</span><div><strong>{film.title}</strong><small>{film.year}</small></div><Icon name="check" size={18}/></article>)}</section>}
    {screen==="settings"&&<section className="screen"><div className="titleBlock"><h1>Réglages</h1><p>Tes profils restent uniquement sur cet appareil.</p></div><h3 className="sectionLabel">PROFILS</h3><div className="settingsGroup"><label><span className="service sc">SC</span><div><small>SensCritique</small><input value={sc} placeholder="Nom de profil" autoComplete="off" spellCheck={false} onChange={event=>setSc(event.target.value)}/></div>{sc&&<i className="online"/>}</label><label><span className="service lb">LB</span><div><small>Letterboxd</small><input value={lb} placeholder="Nom de profil" autoComplete="off" spellCheck={false} onChange={event=>setLb(event.target.value)}/></div>{lb&&<i className="online"/>}</label></div>{error&&<div className="syncError" role="alert"><Icon name="alert" size={17}/><span>{error}</span></div>}<h3 className="sectionLabel">IMPORT</h3><div className="settingsGroup"><button><Icon name="external"/><div><strong>Import groupé</strong><small>Un seul fichier pour les films sélectionnés</small></div><span className="pill">Actuel</span></button><button className="disabled"><Icon name="sync"/><div><strong>Import automatique</strong><small>Disponible si Letterboxd autorise la connexion</small></div><span className="pill soon">À venir</span></button></div></section>}

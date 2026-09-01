@@ -1,32 +1,42 @@
 package info.reviewonce.app
 
+import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class LocalLetterboxdEntry(
-    val tmdbId: String,
-    val rating10: Int?,
-    val watchedDate: String?,
-    val reviewHash: String?,
-    val inWatchlist: Boolean,
-    val verifiedAt: Long,
+    val slug: String,
+    val tmdbId: String? = null,
+    val title: String,
+    val year: String? = null,
+    val rating10: Int? = null,
+    val watchedDate: String? = null,
+    val hasReview: Boolean = false,
+    val inWatchlist: Boolean = false,
+    val verifiedAt: Long = System.currentTimeMillis(),
 )
 
-class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "reviewonce.db", null, 1) {
+class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "reviewonce.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
             CREATE TABLE letterboxd_entries (
-                tmdb_id TEXT PRIMARY KEY,
+                slug TEXT PRIMARY KEY,
+                tmdb_id TEXT,
+                title TEXT NOT NULL,
+                year TEXT,
                 rating_10 INTEGER,
                 watched_date TEXT,
-                review_hash TEXT,
+                has_review INTEGER NOT NULL DEFAULT 0,
                 in_watchlist INTEGER NOT NULL DEFAULT 0,
                 verified_at INTEGER NOT NULL
             )
             """.trimIndent()
         )
+        db.execSQL("CREATE INDEX letterboxd_entries_tmdb ON letterboxd_entries(tmdb_id)")
         db.execSQL(
             """
             CREATE TABLE sync_actions (
@@ -38,23 +48,47 @@ class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "review
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        db.execSQL("DROP TABLE IF EXISTS letterboxd_entries")
+        db.execSQL("DROP TABLE IF EXISTS sync_actions")
+        onCreate(db)
+    }
 
-    fun upsert(entry: LocalLetterboxdEntry) {
-        writableDatabase.execSQL(
-            """
-            INSERT INTO letterboxd_entries
-                (tmdb_id, rating_10, watched_date, review_hash, in_watchlist, verified_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(tmdb_id) DO UPDATE SET
-                rating_10 = excluded.rating_10,
-                watched_date = excluded.watched_date,
-                review_hash = excluded.review_hash,
-                in_watchlist = excluded.in_watchlist,
-                verified_at = excluded.verified_at
-            """.trimIndent(),
-            arrayOf(entry.tmdbId, entry.rating10, entry.watchedDate, entry.reviewHash, if (entry.inWatchlist) 1 else 0, entry.verifiedAt)
-        )
+    fun replaceCollection(entries: Collection<LocalLetterboxdEntry>) {
+        writableDatabase.beginTransaction()
+        try {
+            writableDatabase.delete("letterboxd_entries", null, null)
+            entries.forEach { entry -> writableDatabase.insertOrThrow("letterboxd_entries", null, entry.values()) }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+    }
+
+    fun countEntries(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM letterboxd_entries", null).use {
+        if (it.moveToFirst()) it.getInt(0) else 0
+    }
+
+    fun collectionJson(): String {
+        val movies = JSONArray()
+        readableDatabase.rawQuery(
+            "SELECT slug, tmdb_id, title, year, rating_10, watched_date, has_review, in_watchlist FROM letterboxd_entries ORDER BY title",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val slug = cursor.getString(0)
+                val tmdbId = cursor.getString(1)
+                val title = cursor.getString(2)
+                val year = cursor.getString(3).orEmpty()
+                val rating = if (cursor.isNull(4)) JSONObject.NULL else cursor.getInt(4)
+                val date = cursor.getString(5).orEmpty()
+                val hasReview = cursor.getInt(6) == 1
+                val inWatchlist = cursor.getInt(7) == 1
+                movies.put(filmJson(slug, tmdbId, title, year, rating, date, hasReview, false))
+                if (inWatchlist) movies.put(filmJson(slug, tmdbId, title, year, JSONObject.NULL, "", false, true))
+            }
+        }
+        return movies.toString()
     }
 
     fun hasCompletedAction(actionKey: String): Boolean = readableDatabase.rawQuery(
@@ -63,9 +97,45 @@ class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "review
     ).use { it.moveToFirst() }
 
     fun markActionCompleted(actionKey: String, tmdbId: String) {
-        writableDatabase.execSQL(
-            "INSERT OR REPLACE INTO sync_actions (action_key, tmdb_id, completed_at) VALUES (?, ?, ?)",
-            arrayOf(actionKey, tmdbId, System.currentTimeMillis())
-        )
+        val values = ContentValues().apply {
+            put("action_key", actionKey)
+            put("tmdb_id", tmdbId)
+            put("completed_at", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict("sync_actions", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    private fun LocalLetterboxdEntry.values() = ContentValues().apply {
+        put("slug", slug)
+        put("tmdb_id", tmdbId)
+        put("title", title)
+        put("year", year)
+        put("rating_10", rating10)
+        put("watched_date", watchedDate)
+        put("has_review", if (hasReview) 1 else 0)
+        put("in_watchlist", if (inWatchlist) 1 else 0)
+        put("verified_at", verifiedAt)
+    }
+
+    private fun filmJson(
+        slug: String,
+        tmdbId: String?,
+        title: String,
+        year: String,
+        rating: Any,
+        date: String,
+        hasReview: Boolean,
+        wished: Boolean,
+    ) = JSONObject().apply {
+        put("id", "lb-local-${if (wished) "wish" else "film"}-$slug")
+        put("tmdbId", tmdbId ?: JSONObject.NULL)
+        put("title", title)
+        put("year", year)
+        put("rating", rating)
+        put("watchedDate", date)
+        put("review", if (hasReview) "present" else "")
+        put("sourceUrl", "https://letterboxd.com/film/$slug/")
+        put("match", "complete")
+        put("wished", wished)
     }
 }
