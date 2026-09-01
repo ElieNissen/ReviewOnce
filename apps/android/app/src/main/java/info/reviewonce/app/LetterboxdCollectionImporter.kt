@@ -8,7 +8,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
-class LetterboxdCollectionImporter(private val store: LocalCollectionStore) {
+class LetterboxdCollectionImporter(
+    private val store: LocalCollectionStore,
+    private val userAgent: String,
+) {
     private val executor = Executors.newSingleThreadExecutor()
 
     fun import(username: String, onProgress: (String) -> Unit, onComplete: (Result<Int>) -> Unit) {
@@ -53,8 +56,10 @@ class LetterboxdCollectionImporter(private val store: LocalCollectionStore) {
         connection.connectTimeout = 15_000
         connection.readTimeout = 20_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "ReviewOnceAndroid/0.1")
-        connection.setRequestProperty("Accept", "text/html")
+        connection.setRequestProperty("User-Agent", userAgent)
+        connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        connection.setRequestProperty("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+        connection.setRequestProperty("Referer", BASE)
         CookieManager.getInstance().getCookie(BASE)?.let { connection.setRequestProperty("Cookie", it) }
         val status = connection.responseCode
         if (status !in 200..299) throw IllegalStateException("Letterboxd a répondu $status")

@@ -3,60 +3,27 @@ package info.reviewonce.app
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
-import android.graphics.Color
-import android.net.Uri
 import android.os.Bundle
-import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.SafeBrowsingResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
+import org.json.JSONObject
 import org.json.JSONTokener
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
-    private lateinit var status: TextView
     private lateinit var collectionStore: LocalCollectionStore
     private lateinit var collectionImporter: LetterboxdCollectionImporter
     private lateinit var syncController: LetterboxdSyncController
+    private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
+    private var connectingToLetterboxd = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         collectionStore = LocalCollectionStore(this)
-        collectionImporter = LetterboxdCollectionImporter(collectionStore)
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(247, 247, 245))
-        }
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(12, 10, 12, 10)
-        }
-        status = TextView(this).apply {
-            textSize = 12f
-            setPadding(16, 8, 16, 8)
-        }
-        val reviewOnceButton = Button(this).apply {
-            text = "ReviewOnce"
-            setOnClickListener { webView.loadUrl(REVIEW_ONCE_URL) }
-        }
-        val letterboxdButton = Button(this).apply {
-            text = "Connexion Letterboxd"
-            setOnClickListener { webView.loadUrl(LETTERBOXD_SIGN_IN_URL) }
-        }
-        val refreshCollectionButton = Button(this).apply {
-            text = "Actualiser"
-            setOnClickListener { refreshLocalCollection() }
-        }
-        controls.addView(reviewOnceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        controls.addView(letterboxdButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        controls.addView(refreshCollectionButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -64,32 +31,59 @@ class MainActivity : Activity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.1.0"
+            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.2.0"
             WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    val scheme = request.url.scheme
-                    if (syncController.handleResult(request.url)) return true
-                    if (scheme == "reviewonce") {
-                        when (request.url.host) {
-                            "sync" -> handleSyncRequest()
-                            "collection" -> sendLocalCollection()
-                        }
-                        return true
+        }
+        collectionImporter = LetterboxdCollectionImporter(
+            store = collectionStore,
+            userAgent = webView.settings.userAgentString,
+        )
+        syncController = LetterboxdSyncController(
+            webView = webView,
+            store = collectionStore,
+            onStatus = { message -> runOnUiThread { sendNativeEvent("sync-progress", message = message) } },
+            onFinished = { success, failures -> runOnUiThread {
+                webView.loadUrl(REVIEW_ONCE_URL)
+                webView.postDelayed({
+                    sendNativeEvent(
+                        type = "sync-complete",
+                        message = "$success synchronisation(s) réussie(s)${if (failures > 0) " · $failures en attente" else ""}",
+                    )
+                }, CALLBACK_DELAY_MS)
+            } },
+        )
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val uri = request.url
+                if (syncController.handleResult(uri)) return true
+                if (uri.scheme == "reviewonce") {
+                    when (uri.host) {
+                        "session" -> sendSession()
+                        "connect" -> connectLetterboxd()
+                        "refresh" -> refreshLocalCollection(uri.getQueryParameter("username").orEmpty())
+                        "sync" -> handleSyncRequest()
+                        "collection" -> sendLocalCollection()
                     }
-                    return scheme != "https"
+                    return true
                 }
+                return uri.scheme != "https"
+            }
 
-                override fun onPageFinished(view: WebView, url: String) {
-                    super.onPageFinished(view, url)
-                    if (syncController.onPageFinished(url)) return
-                    updateSessionStatus()
-                    CookieManager.getInstance().flush()
-                }
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                if (syncController.onPageFinished(url)) return
+                CookieManager.getInstance().flush()
+                if (url.startsWith(LETTERBOXD_URL)) detectLetterboxdAccount()
+            }
 
-                override fun onSafeBrowsingHit(view: WebView, request: WebResourceRequest, threatType: Int, callback: SafeBrowsingResponse) {
-                    callback.backToSafety(true)
-                }
+            override fun onSafeBrowsingHit(
+                view: WebView,
+                request: WebResourceRequest,
+                threatType: Int,
+                callback: SafeBrowsingResponse,
+            ) {
+                callback.backToSafety(true)
             }
         }
 
@@ -98,62 +92,72 @@ class MainActivity : Activity() {
             setAcceptThirdPartyCookies(webView, false)
         }
 
-        syncController = LetterboxdSyncController(
-            webView = webView,
-            store = collectionStore,
-            onStatus = { message -> runOnUiThread { status.text = message } },
-            onFinished = { success, failures -> runOnUiThread {
-                status.text = "$success synchronisation(s) réussie(s)${if (failures > 0) " · $failures en attente" else ""}"
-                webView.loadUrl(REVIEW_ONCE_URL)
-            } },
-        )
-
-        root.addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        setContentView(root)
-
-        updateSessionStatus()
+        setContentView(webView)
         webView.loadUrl(savedInstanceState?.getString(STATE_URL) ?: REVIEW_ONCE_URL)
     }
 
-    private fun updateSessionStatus() {
-        val hasLetterboxdCookies = !CookieManager.getInstance().getCookie(LETTERBOXD_URL).isNullOrBlank()
-        status.text = if (hasLetterboxdCookies) {
-            "Session Letterboxd enregistrée sur cet appareil"
-        } else {
-            "Connecte Letterboxd une fois pour préparer la synchronisation directe"
+    private fun connectLetterboxd() {
+        connectingToLetterboxd = true
+        webView.loadUrl(LETTERBOXD_SIGN_IN_URL)
+    }
+
+    private fun detectLetterboxdAccount() {
+        webView.evaluateJavascript(DETECT_ACCOUNT_SCRIPT) { raw ->
+            val username = decodeJavascriptString(raw)
+            if (username.isBlank()) return@evaluateJavascript
+            preferences.edit().putString(LETTERBOXD_USERNAME, username).apply()
+            if (connectingToLetterboxd) {
+                connectingToLetterboxd = false
+                webView.loadUrl(REVIEW_ONCE_URL)
+                webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
+            }
         }
     }
 
-    private fun refreshLocalCollection() {
-        if (!webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) webView.loadUrl(REVIEW_ONCE_URL)
-        webView.postDelayed({
-            webView.evaluateJavascript("localStorage.getItem('senssync-lb') || ''") { raw ->
-                val username = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
-                if (username.isBlank()) {
-                    status.text = "Renseigne d’abord ton profil Letterboxd dans ReviewOnce"
-                    return@evaluateJavascript
-                }
-                collectionImporter.import(
-                    username = username,
-                    onProgress = { message -> runOnUiThread { status.text = message } },
-                    onComplete = { result -> runOnUiThread {
-                        status.text = result.fold(
-                            onSuccess = { count -> "$count films Letterboxd enregistrés localement" },
-                            onFailure = { error -> error.message ?: "Lecture Letterboxd impossible" },
+    private fun sendSession() {
+        val username = preferences.getString(LETTERBOXD_USERNAME, "").orEmpty()
+        val hasCookies = !CookieManager.getInstance().getCookie(LETTERBOXD_URL).isNullOrBlank()
+        sendNativeEvent(
+            type = "session",
+            username = username,
+            connected = hasCookies && username.isNotBlank(),
+        )
+    }
+
+    private fun refreshLocalCollection(username: String) {
+        if (username.isBlank()) {
+            sendNativeEvent("collection-error", message = "Connecte d’abord ton compte Letterboxd.")
+            return
+        }
+        preferences.edit().putString(LETTERBOXD_USERNAME, username).apply()
+        collectionImporter.import(
+            username = username,
+            onProgress = { message -> runOnUiThread { sendNativeEvent("collection-progress", message = message) } },
+            onComplete = { result -> runOnUiThread {
+                result.fold(
+                    onSuccess = { count ->
+                        sendNativeEvent(
+                            type = "collection-complete",
+                            message = "$count films Letterboxd vérifiés",
+                            collection = collectionStore.collectionJson(),
                         )
-                    } },
+                    },
+                    onFailure = { error ->
+                        sendNativeEvent(
+                            type = "collection-error",
+                            message = error.message ?: "Lecture Letterboxd impossible",
+                        )
+                    },
                 )
-            }
-        }, 500)
+            } },
+        )
     }
 
     private fun handleSyncRequest() {
         webView.evaluateJavascript("localStorage.getItem('reviewonce-android-payload') || ''") { raw ->
-            val payload = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
+            val payload = decodeJavascriptString(raw)
             val actions = runCatching { SyncAction.parse(payload) }.getOrElse {
-                status.text = "File de synchronisation invalide"
+                sendNativeEvent("sync-error", message = "File de synchronisation invalide")
                 return@evaluateJavascript
             }
             if (actions.isEmpty()) return@evaluateJavascript
@@ -164,8 +168,7 @@ class MainActivity : Activity() {
                 .setPositiveButton("Synchroniser") { _, _ ->
                     val cookies = CookieManager.getInstance().getCookie(LETTERBOXD_URL)
                     if (cookies.isNullOrBlank()) {
-                        status.text = "Connecte-toi d’abord à Letterboxd"
-                        webView.loadUrl(LETTERBOXD_SIGN_IN_URL)
+                        sendNativeEvent("sync-error", message = "Connecte-toi d’abord à Letterboxd")
                     } else {
                         syncController.start(actions)
                     }
@@ -175,12 +178,32 @@ class MainActivity : Activity() {
     }
 
     private fun sendLocalCollection() {
-        val collection = collectionStore.collectionJson()
+        sendNativeEvent(type = "collection", collection = collectionStore.collectionJson())
+    }
+
+    private fun sendNativeEvent(
+        type: String,
+        message: String = "",
+        username: String = "",
+        connected: Boolean? = null,
+        collection: String? = null,
+    ) {
+        if (!webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) return
+        val payload = JSONObject().apply {
+            put("type", type)
+            if (message.isNotBlank()) put("message", message)
+            if (username.isNotBlank()) put("username", username)
+            if (connected != null) put("connected", connected)
+            if (collection != null) put("collection", JSONTokener(collection).nextValue())
+        }
         webView.evaluateJavascript(
-            "window.__reviewOnceReceiveCollection && window.__reviewOnceReceiveCollection(${org.json.JSONObject.quote(collection)})",
+            "window.__reviewOnceNativeEvent && window.__reviewOnceNativeEvent(${JSONObject.quote(payload.toString())})",
             null,
         )
     }
+
+    private fun decodeJavascriptString(raw: String): String =
+        runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(STATE_URL, webView.url ?: REVIEW_ONCE_URL)
@@ -196,12 +219,19 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         webView.onResume()
-        updateSessionStatus()
+        if (webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) webView.postDelayed({ sendSession() }, 300)
     }
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
-        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+        if (webView.url.orEmpty().startsWith(LETTERBOXD_URL)) {
+            connectingToLetterboxd = false
+            webView.loadUrl(REVIEW_ONCE_URL)
+        } else if (webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            super.onBackPressed()
+        }
     }
 
     override fun onDestroy() {
@@ -216,5 +246,24 @@ class MainActivity : Activity() {
         private const val LETTERBOXD_URL = "https://letterboxd.com/"
         private const val LETTERBOXD_SIGN_IN_URL = "https://letterboxd.com/sign-in/"
         private const val STATE_URL = "current_url"
+        private const val PREFERENCES = "reviewonce-local"
+        private const val LETTERBOXD_USERNAME = "letterboxd-username"
+        private const val CALLBACK_DELAY_MS = 900L
+        private val DETECT_ACCOUNT_SCRIPT = """
+            (() => {
+              const selectors = [
+                '.navitem-profile a[href]',
+                'a[href$="/activity/"]',
+                'a[href$="/films/"][data-person]'
+              ];
+              for (const selector of selectors) {
+                const link = document.querySelector(selector);
+                if (!link) continue;
+                const parts = new URL(link.href, location.origin).pathname.split('/').filter(Boolean);
+                if (parts.length && !['film','films','activity','sign-in'].includes(parts[0])) return parts[0];
+              }
+              return '';
+            })()
+        """.trimIndent()
     }
 }
