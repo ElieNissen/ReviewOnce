@@ -2,7 +2,9 @@ package info.reviewonce.app
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -20,6 +22,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var collectionStore: LocalCollectionStore
     private lateinit var collectionImporter: LetterboxdCollectionImporter
+    private lateinit var syncController: LetterboxdSyncController
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,15 +64,22 @@ class MainActivity : Activity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.1.0"
             WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val scheme = request.url.scheme
-                    return if (scheme == "https") false else true
+                    if (syncController.handleResult(request.url)) return true
+                    if (scheme == "reviewonce") {
+                        handleSyncRequest()
+                        return true
+                    }
+                    return scheme != "https"
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
                     super.onPageFinished(view, url)
+                    if (syncController.onPageFinished(url)) return
                     updateSessionStatus()
                     CookieManager.getInstance().flush()
                 }
@@ -84,6 +94,16 @@ class MainActivity : Activity() {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, false)
         }
+
+        syncController = LetterboxdSyncController(
+            webView = webView,
+            store = collectionStore,
+            onStatus = { message -> runOnUiThread { status.text = message } },
+            onFinished = { success, failures -> runOnUiThread {
+                status.text = "$success synchronisation(s) réussie(s)${if (failures > 0) " · $failures en attente" else ""}"
+                webView.loadUrl(REVIEW_ONCE_URL)
+            } },
+        )
 
         root.addView(status, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -124,6 +144,31 @@ class MainActivity : Activity() {
                 )
             }
         }, 500)
+    }
+
+    private fun handleSyncRequest() {
+        webView.evaluateJavascript("localStorage.getItem('reviewonce-android-payload') || ''") { raw ->
+            val payload = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
+            val actions = runCatching { SyncAction.parse(payload) }.getOrElse {
+                status.text = "File de synchronisation invalide"
+                return@evaluateJavascript
+            }
+            if (actions.isEmpty()) return@evaluateJavascript
+            AlertDialog.Builder(this)
+                .setTitle("Synchroniser ${actions.size} film(s) ?")
+                .setMessage("ReviewOnce va utiliser ta session Letterboxd locale. Les films déjà traités ne seront pas publiés deux fois.")
+                .setNegativeButton("Annuler", null)
+                .setPositiveButton("Synchroniser") { _, _ ->
+                    val cookies = CookieManager.getInstance().getCookie(LETTERBOXD_URL)
+                    if (cookies.isNullOrBlank()) {
+                        status.text = "Connecte-toi d’abord à Letterboxd"
+                        webView.loadUrl(LETTERBOXD_SIGN_IN_URL)
+                    } else {
+                        syncController.start(actions)
+                    }
+                }
+                .show()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
