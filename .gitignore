@@ -53,6 +53,11 @@ next-env.d.ts
 /android/app/build/
 /android/build/
 /android/local.properties
+/apps/android/.gradle/
+/apps/android/.idea/
+/apps/android/app/build/
+/apps/android/build/
+/apps/android/local.properties
 *.apk
 *.aab
 

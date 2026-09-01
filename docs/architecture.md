@@ -11,7 +11,7 @@ ReviewOnce sépare quatre responsabilités afin que l’interface web puisse dev
 
 ## Direction mobile
 
-La première version APK pourra embarquer la PWA avec Capacitor. Une automatisation plus avancée devra rester locale sur le téléphone : session utilisateur dans une WebView sécurisée, stockage chiffré Android et file d’actions explicite. Aucun identifiant SensCritique ou Letterboxd ne doit transiter par le serveur.
+Le prototype `apps/android` embarque le site dans une WebView dédiée. La connexion Letterboxd est effectuée une fois par l’utilisateur puis conservée dans le stockage privé de WebView. Une base SQLite locale mémorise la collection et les actions terminées. L’automatisation reste locale, au premier plan et explicite. Aucun cookie, mot de passe ou historique Letterboxd ne doit transiter par le serveur.
 
 ## Cibles de synchronisation
 
