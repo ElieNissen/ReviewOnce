@@ -19,11 +19,7 @@ function choose(product:ScProduct,candidates:Candidate[]):Resolved|null{
 }
 
 async function resolveBySensCritiqueId(products:ScProduct[]){
- const recentLimit=Date.now()-180*86400000;
- const ids=[...new Set(products.filter(product=>{
-  const date=product.otherUserInfos?.dateDone;
-  return date&&new Date(date).getTime()>=recentLimit;
- }).map(product=>String(product.id)))];
+ const ids=[...new Set(products.map(product=>String(product.id)))];
  const missing=ids.filter(id=>!matchCache.has(id));
  for(let start=0;start<missing.length;start+=100){
   const chunk=missing.slice(start,start+100);
@@ -72,10 +68,10 @@ async function resolveWithWikidata(products:ScProduct[]){
 
 function claim(entity:WikidataEntity,property:string){const value=entity.claims?.[property]?.[0]?.mainsnak?.datavalue?.value;return typeof value==="object"&&value?String(value.time||""):String(value||"")}
 
-async function requestPage(username:string,offset:number){
+async function requestPage(username:string,offset:number,action:"DONE"|"WISH"){
  const profile=`https://www.senscritique.com/${username}/collection?universe=1`;
  for(let attempt=0;attempt<3;attempt++){
-  const response=await fetch("https://apollo.senscritique.com/",{method:"POST",headers:{"content-type":"application/json",accept:"application/json",referer:profile,"user-agent":"Mozilla/5.0 SensSync/1.1"},body:JSON.stringify({query:QUERY,variables:{action:"DONE",offset,universe:"movie",username}})});
+  const response=await fetch("https://apollo.senscritique.com/",{method:"POST",headers:{"content-type":"application/json",accept:"application/json",referer:profile,"user-agent":"Mozilla/5.0 ReviewOnce/1.4"},body:JSON.stringify({query:QUERY,variables:{action,offset,universe:"movie",username}})});
   if(response.ok)return response.json() as Promise<ScResponse>;
   if(response.status!==429)throw Error(`SensCritique a répondu ${response.status}`);
   const retry=Number(response.headers.get("retry-after")||0);
@@ -84,10 +80,10 @@ async function requestPage(username:string,offset:number){
  throw Error("SensCritique limite temporairement les demandes. Réessaie dans quelques minutes.");
 }
 
-async function collection(username:string){
+async function collection(username:string,action:"DONE"|"WISH"){
  const all:ScProduct[]=[];let total=1;
  for(let offset=0;offset<total&&offset<2000;offset+=20){
-  const data=await requestPage(username,offset),result=data?.data?.user?.collection;
+  const data=await requestPage(username,offset,action),result=data?.data?.user?.collection;
   if(!result)throw Error("Profil introuvable ou temporairement inaccessible");
   total=result.total;all.push(...result.products);
   if(!result.products.length)break;
@@ -102,9 +98,10 @@ export async function GET(request:Request){
  const key=username.toLowerCase(),cached=memoryCache.get(key);
  if(!force&&cached&&cached.expires>Date.now())return Response.json({movies:cached.movies,total:cached.movies.length,source:"cache"},{headers:{"cache-control":"public, max-age=300, s-maxage=1800"}});
  try{
-  const products=await collection(username);
-  const direct=await resolveBySensCritiqueId(products),unresolved=products.filter(product=>!direct.get(String(product.id))&&product.otherUserInfos?.dateDone&&new Date(product.otherUserInfos.dateDone).getTime()>=Date.now()-180*86400000),tmdb=await resolveWithTmdb(unresolved),stillUnresolved=unresolved.filter(product=>!tmdb.get(String(product.id))),wikidata=await resolveWithWikidata(stillUnresolved);
-  const movies=products.map((p:ScProduct)=>{const info=p.otherUserInfos||{},reviewUrl=info.isReviewed&&info.review?.url?info.review.url:"",aliases=[p.title,p.originalTitle].filter((title):title is string=>Boolean(title)),resolved=direct.get(String(p.id))||tmdb.get(String(p.id))||wikidata.get(String(p.id))||undefined;return{id:String(p.id),tmdbId:resolved?.tmdbId,title:p.title||p.originalTitle||"Film sans titre",aliases,year:String(p.yearOfProduction||""),rating:info.rating||null,watchedDate:info.dateDone?.split("T")[0]||"",review:reviewUrl?"present":"",reviewUrl,poster:p.medias?.picture||"",sourceUrl:p.url?`https://www.senscritique.com${p.url}`:"",letterboxdUrl:resolved?.letterboxdUrl,matchCandidates:resolved?.matchCandidates,matchConfidence:resolved?.confidence,synced:false,wished:false}});
+  const done=await collection(username,"DONE"),wish=await collection(username,"WISH"),products=[...done,...wish];
+  const direct=await resolveBySensCritiqueId(products),unresolved=products.filter(product=>!direct.get(String(product.id))&&(wish.includes(product)||(product.otherUserInfos?.dateDone&&new Date(product.otherUserInfos.dateDone).getTime()>=Date.now()-180*86400000))),tmdb=await resolveWithTmdb(unresolved),stillUnresolved=unresolved.filter(product=>!tmdb.get(String(product.id))),wikidata=await resolveWithWikidata(stillUnresolved);
+  const toFilm=(p:ScProduct,wished:boolean)=>{const info=p.otherUserInfos||{},reviewUrl=info.isReviewed&&info.review?.url?info.review.url:"",aliases=[p.title,p.originalTitle].filter((title):title is string=>Boolean(title)),resolved=direct.get(String(p.id))||tmdb.get(String(p.id))||wikidata.get(String(p.id))||undefined;return{id:`${wished?"wish":"done"}-${p.id}`,tmdbId:resolved?.tmdbId,title:p.title||p.originalTitle||"Film sans titre",aliases,year:String(p.yearOfProduction||""),rating:wished?null:info.rating||null,watchedDate:wished?"":info.dateDone?.split("T")[0]||"",review:wished?"":reviewUrl?"present":"",reviewUrl:wished?"":reviewUrl,poster:p.medias?.picture||"",sourceUrl:p.url?`https://www.senscritique.com${p.url}`:"",letterboxdUrl:resolved?.letterboxdUrl,matchCandidates:resolved?.matchCandidates,matchConfidence:resolved?.confidence,synced:false,wished}};
+  const movies=[...done.map(product=>toFilm(product,false)),...wish.map(product=>toFilm(product,true))];
   memoryCache.set(key,{expires:Date.now()+30*60*1000,movies});
   return Response.json({movies,total:movies.length,syncedAt:new Date().toISOString(),source:"senscritique"},{headers:force?{"cache-control":"no-store"}:{"cache-control":"public, max-age=300, s-maxage=1800"}});
  }catch(error){return Response.json({error:error instanceof Error?error.message:"Synchronisation impossible"},{status:503,headers:{"retry-after":"120"}})}

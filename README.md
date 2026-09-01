@@ -7,7 +7,9 @@ ReviewOnce détecte les films, notes et critiques loggés sur un profil SensCrit
 - lecture des profils publics SensCritique et Letterboxd ;
 - comparaison locale champ par champ ;
 - détection des films, notes et critiques manquants ;
-- transfert assisté vers Letterboxd, sans import CSV ;
+- import officiel en lot vers Letterboxd, sans ressaisie de notes ou critiques ;
+- comparaison de la collection et de la watchlist ;
+- file idempotente préparant une future synchronisation directe ;
 - résolution des films par identifiants SensCritique, Wikidata et TMDB ;
 - score de confiance et choix manuel pour les correspondances ambiguës ;
 - cache et limitation des appels pour respecter les plateformes.
@@ -29,8 +31,8 @@ Commandes utiles :
 
 ## Architecture
 
-La logique métier indépendante se trouve dans src/domain. Les connecteurs web sont exposés dans app/api et l’interface PWA dans app. Voir docs/architecture.md pour la trajectoire APK et l’automatisation locale.
+La logique métier indépendante se trouve dans src/domain. Les connecteurs web sont exposés dans app/api et l’interface PWA dans app. Voir docs/architecture.md pour la trajectoire APK et l’automatisation locale. Le dossier de demande d’accès OAuth/API Letterboxd est prêt dans docs/letterboxd-api-application.md.
 
 ## Limites
 
-SensCritique et Letterboxd ne fournissent pas d’API publique complète adaptée à ce cas. Les connecteurs actuels lisent leurs pages publiques et peuvent être affectés par des changements de structure ou des limitations temporaires. Une écriture automatique sur Letterboxd nécessitera une exécution locale et une validation explicite de l’utilisateur.
+SensCritique et Letterboxd ne fournissent pas d’API publique complète ouverte à ce cas. Les connecteurs de lecture actuels peuvent être affectés par des changements de structure ou des limitations temporaires. L’import CSV est la cible officielle disponible ; la synchronisation directe sera activée uniquement après approbation OAuth/API de Letterboxd.

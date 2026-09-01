@@ -1,4 +1,4 @@
-export type MissingField="film"|"rating"|"review"|"date";
+export type MissingField="film"|"rating"|"review"|"date"|"watchlist";
 export type MatchStatus="ready"|"review"|"complete"|"ignored";
 export type FilmCandidate={tmdbId:string;title:string;year:string;letterboxdUrl:string;confidence:number};
 
