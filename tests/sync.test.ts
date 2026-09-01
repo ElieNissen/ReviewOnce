@@ -29,8 +29,13 @@ test("exports only missing fields for an existing Letterboxd film",()=>{
  assert.doesNotMatch(result.diary,/,8,2025-08-15,/);
 });
 
-test("does not export ambiguous or unidentified films",()=>{
- const result=buildOfficialImports([film({match:"review"}),film({id:"done-2",tmdbId:undefined})]);
+test("exports an identified film even when its Letterboxd log was not verified",()=>{
+ const result=buildOfficialImports([film({match:"review"})]);
+ assert.equal(result.diaryCount,1);
+});
+
+test("does not export an unidentified film",()=>{
+ const result=buildOfficialImports([film({tmdbId:undefined})]);
  assert.equal(result.diaryCount,0);
 });
 
@@ -53,7 +58,7 @@ test("compares watchlists separately from watched films",()=>{
  assert.equal(complete[0].match,"complete");
 });
 
-test("never auto-prepares an unidentified or partial absence",()=>{
+test("marks an unidentified or partial absence for review",()=>{
  const unidentified=film({tmdbId:undefined,letterboxdUrl:undefined});
  assert.equal(compareLibraries([unidentified],[])[0].match,"review");
  assert.equal(compareLibraries([film()],[],[],true)[0].match,"review");

@@ -36,7 +36,7 @@ const csvCell=(value:string|number|null|undefined)=>{
 const csv=(headers:string[],rows:Array<Array<string|number|null|undefined>>)=>"\uFEFF"+[headers,...rows].map(row=>row.map(csvCell).join(",")).join("\r\n")+"\r\n";
 
 export function buildOfficialImports(films:Film[]){
- const ready=films.filter(film=>film.match==="ready"&&film.missing?.length&&film.tmdbId);
+ const ready=films.filter(film=>film.match!=="complete"&&film.match!=="ignored"&&film.missing?.length&&film.tmdbId);
  const diary=ready.filter(film=>!film.wished).map(film=>{const missing=film.missing||[],wholeFilm=missing.includes("film");return[
   film.tmdbId,film.title,film.year,
   wholeFilm||missing.includes("rating")?film.rating??"":"",
