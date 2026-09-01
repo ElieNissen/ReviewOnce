@@ -13,16 +13,19 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONTokener
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var status: TextView
     private lateinit var collectionStore: LocalCollectionStore
+    private lateinit var collectionImporter: LetterboxdCollectionImporter
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         collectionStore = LocalCollectionStore(this)
+        collectionImporter = LetterboxdCollectionImporter(collectionStore)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -44,8 +47,13 @@ class MainActivity : Activity() {
             text = "Connexion Letterboxd"
             setOnClickListener { webView.loadUrl(LETTERBOXD_SIGN_IN_URL) }
         }
+        val refreshCollectionButton = Button(this).apply {
+            text = "Actualiser"
+            setOnClickListener { refreshLocalCollection() }
+        }
         controls.addView(reviewOnceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         controls.addView(letterboxdButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        controls.addView(refreshCollectionButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -95,6 +103,29 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun refreshLocalCollection() {
+        if (!webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) webView.loadUrl(REVIEW_ONCE_URL)
+        webView.postDelayed({
+            webView.evaluateJavascript("localStorage.getItem('senssync-lb') || ''") { raw ->
+                val username = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
+                if (username.isBlank()) {
+                    status.text = "Renseigne d’abord ton profil Letterboxd dans ReviewOnce"
+                    return@evaluateJavascript
+                }
+                collectionImporter.import(
+                    username = username,
+                    onProgress = { message -> runOnUiThread { status.text = message } },
+                    onComplete = { result -> runOnUiThread {
+                        status.text = result.fold(
+                            onSuccess = { count -> "$count films Letterboxd enregistrés localement" },
+                            onFailure = { error -> error.message ?: "Lecture Letterboxd impossible" },
+                        )
+                    } },
+                )
+            }
+        }, 500)
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(STATE_URL, webView.url ?: REVIEW_ONCE_URL)
         super.onSaveInstanceState(outState)
@@ -119,6 +150,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         webView.destroy()
+        collectionImporter.close()
         collectionStore.close()
         super.onDestroy()
     }
