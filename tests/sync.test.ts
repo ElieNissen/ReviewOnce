@@ -3,7 +3,7 @@ import assert from"node:assert/strict";
 import{buildOfficialImports,buildSyncQueue,syncKey}from"../src/domain/sync.ts";
 import{compareLibraries}from"../src/domain/compare.ts";
 import type{Film}from"../src/domain/film.ts";
-import{LETTERBOXD_IMPORT_URL,letterboxdImportTarget}from"../src/platform/letterboxd-browser.ts";
+import{LETTERBOXD_IMPORT_URL,androidBrowserPackage,letterboxdImportTarget}from"../src/platform/letterboxd-browser.ts";
 
 const film=(overrides:Partial<Film>={}):Film=>({
  id:"done-1",tmdbId:"123",title:"Film, with comma",year:"2025",rating:8,watchedDate:"2025-08-15",
@@ -19,6 +19,13 @@ test("forces Chrome for the Letterboxd import page on Android",()=>{
  assert.match(target,/^intent:\/\/letterboxd\.com\/import\//);
  assert.match(target,/package=com\.android\.chrome/);
  assert.match(target,/browser_fallback_url=https%3A%2F%2Fletterboxd\.com%2Fimport%2F/);
+});
+
+test("keeps the current supported Android browser",()=>{
+ assert.equal(androidBrowserPackage("Android Firefox/142"),"org.mozilla.firefox");
+ assert.equal(androidBrowserPackage("Android EdgA/140"),"com.microsoft.emmx");
+ assert.equal(androidBrowserPackage("Android SamsungBrowser/28"),"com.sec.android.app.sbrowser");
+ assert.match(letterboxdImportTarget("Android Firefox/142"),/package=org\.mozilla\.firefox/);
 });
 
 test("builds Letterboxd diary CSV with exact TMDB fields and escaping",()=>{
