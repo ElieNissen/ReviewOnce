@@ -37,17 +37,18 @@ export default function Home(){
  const selectable=films.filter(isSelectable),choice=films.filter(needsChoice),complete=films.filter(film=>film.match==="complete");
  const selectedSet=new Set(selected),selectedFilms=selectable.filter(film=>selectedSet.has(film.id));
 
+ function nativeCollection(){return new Promise<Film[]>((resolve,reject)=>{const nativeWindow=window as typeof window&{__reviewOnceReceiveCollection?:(payload:string)=>void};const timeout=window.setTimeout(()=>{delete nativeWindow.__reviewOnceReceiveCollection;reject(Error("La collection locale n’a pas répondu."))},10000);nativeWindow.__reviewOnceReceiveCollection=(payload:string)=>{window.clearTimeout(timeout);delete nativeWindow.__reviewOnceReceiveCollection;try{resolve(JSON.parse(payload) as Film[])}catch{reject(Error("La collection locale est illisible."))}};window.open("reviewonce://collection","_self")})}
+
  async function refresh(){
   if(!sc.trim()||!lb.trim()){setError("Renseigne tes deux profils dans les réglages.");setScreen("settings");return}
   setLoading(true);setError("");setNotice("");setImportReady(false);
   try{
-   const nonce=Date.now(),[sr,lr]=await Promise.all([
-    fetch(`/api/senscritique?username=${encodeURIComponent(sc)}&refresh=1&_t=${nonce}`,{cache:"no-store"}),
-    fetch(`/api/letterboxd?username=${encodeURIComponent(lb)}&_t=${nonce}`,{cache:"no-store"})
-   ]);
-   const sd=await sr.json(),ld=await lr.json();
+   const nonce=Date.now(),srPromise=fetch(`/api/senscritique?username=${encodeURIComponent(sc)}&refresh=1&_t=${nonce}`,{cache:"no-store"});
+   const [sr,localMovies,lr]=androidApp?await Promise.all([srPromise,nativeCollection(),Promise.resolve(null)]):await Promise.all([srPromise,Promise.resolve(null),fetch(`/api/letterboxd?username=${encodeURIComponent(lb)}&_t=${nonce}`,{cache:"no-store"})]);
+   const sd=await sr.json(),ld=lr?await lr.json():{movies:localMovies||[],limited:false};
    if(!sr.ok)throw Error(sd.error||"SensCritique est momentanément inaccessible.");
-   if(!lr.ok)throw Error(ld.error||"Letterboxd est momentanément inaccessible.");
+   if(lr&&!lr.ok)throw Error(ld.error||"Letterboxd est momentanément inaccessible.");
+   if(androidApp&&!ld.movies.length)throw Error("Actualise d’abord ta collection Letterboxd avec le bouton de l’application.");
    const source:Film[]=ld.limited?sd.movies.filter((film:Film)=>film.watchedDate&&film.watchedDate>=ld.coverageFrom):sd.movies;
    const compared=compareLibraries(source,ld.movies,films,Boolean(ld.limited));
    setFilms(compared);setSelected(compared.filter(isSelectable).map(film=>film.id));

@@ -4,6 +4,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class LocalLetterboxdEntry(
     val slug: String,
@@ -67,6 +69,28 @@ class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "review
         if (it.moveToFirst()) it.getInt(0) else 0
     }
 
+    fun collectionJson(): String {
+        val movies = JSONArray()
+        readableDatabase.rawQuery(
+            "SELECT slug, tmdb_id, title, year, rating_10, watched_date, has_review, in_watchlist FROM letterboxd_entries ORDER BY title",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val slug = cursor.getString(0)
+                val tmdbId = cursor.getString(1)
+                val title = cursor.getString(2)
+                val year = cursor.getString(3).orEmpty()
+                val rating = if (cursor.isNull(4)) JSONObject.NULL else cursor.getInt(4)
+                val date = cursor.getString(5).orEmpty()
+                val hasReview = cursor.getInt(6) == 1
+                val inWatchlist = cursor.getInt(7) == 1
+                movies.put(filmJson(slug, tmdbId, title, year, rating, date, hasReview, false))
+                if (inWatchlist) movies.put(filmJson(slug, tmdbId, title, year, JSONObject.NULL, "", false, true))
+            }
+        }
+        return movies.toString()
+    }
+
     fun hasCompletedAction(actionKey: String): Boolean = readableDatabase.rawQuery(
         "SELECT 1 FROM sync_actions WHERE action_key = ? LIMIT 1",
         arrayOf(actionKey)
@@ -91,5 +115,27 @@ class LocalCollectionStore(context: Context) : SQLiteOpenHelper(context, "review
         put("has_review", if (hasReview) 1 else 0)
         put("in_watchlist", if (inWatchlist) 1 else 0)
         put("verified_at", verifiedAt)
+    }
+
+    private fun filmJson(
+        slug: String,
+        tmdbId: String?,
+        title: String,
+        year: String,
+        rating: Any,
+        date: String,
+        hasReview: Boolean,
+        wished: Boolean,
+    ) = JSONObject().apply {
+        put("id", "lb-local-${if (wished) "wish" else "film"}-$slug")
+        put("tmdbId", tmdbId ?: JSONObject.NULL)
+        put("title", title)
+        put("year", year)
+        put("rating", rating)
+        put("watchedDate", date)
+        put("review", if (hasReview) "present" else "")
+        put("sourceUrl", "https://letterboxd.com/film/$slug/")
+        put("match", "complete")
+        put("wished", wished)
     }
 }

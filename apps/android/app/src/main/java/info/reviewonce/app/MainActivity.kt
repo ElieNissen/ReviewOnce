@@ -71,7 +71,10 @@ class MainActivity : Activity() {
                     val scheme = request.url.scheme
                     if (syncController.handleResult(request.url)) return true
                     if (scheme == "reviewonce") {
-                        handleSyncRequest()
+                        when (request.url.host) {
+                            "sync" -> handleSyncRequest()
+                            "collection" -> sendLocalCollection()
+                        }
                         return true
                     }
                     return scheme != "https"
@@ -169,6 +172,14 @@ class MainActivity : Activity() {
                 }
                 .show()
         }
+    }
+
+    private fun sendLocalCollection() {
+        val collection = collectionStore.collectionJson()
+        webView.evaluateJavascript(
+            "window.__reviewOnceReceiveCollection && window.__reviewOnceReceiveCollection(${org.json.JSONObject.quote(collection)})",
+            null,
+        )
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
