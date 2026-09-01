@@ -5,6 +5,7 @@ import{useEffect,useState}from"react";
 import type{Film,MissingField}from"../src/domain/film";
 import{compareLibraries}from"../src/domain/compare";
 import{buildOfficialImports}from"../src/domain/sync";
+import{isAndroid,letterboxdImportTarget}from"../src/platform/letterboxd-browser";
 
 const icons:Record<string,React.ReactNode>={
  sync:<><path d="M20 7h-5V2"/><path d="M20 2l-4 4a7 7 0 1 0 2 9"/></>,
@@ -26,7 +27,7 @@ export default function Home(){
  const[films,setFilms]=useState<Film[]>([]),[selected,setSelected]=useState<string[]>([]);
  const[sc,setSc]=useState(""),[lb,setLb]=useState(""),[loading,setLoading]=useState(false);
  const[lastSync,setLastSync]=useState<string|null>(null),[sheet,setSheet]=useState<Film|null>(null);
- const[error,setError]=useState(""),[notice,setNotice]=useState("");
+ const[error,setError]=useState(""),[notice,setNotice]=useState(""),[importReady,setImportReady]=useState(false);
 
  useEffect(()=>{const schema=localStorage.getItem("reviewonce-schema");if(schema!=="2"){["senssync-films","senssync-last"].forEach(key=>localStorage.removeItem(key));localStorage.setItem("reviewonce-schema","2")}const raw=localStorage.getItem("senssync-films"),last=localStorage.getItem("senssync-last"),savedSc=localStorage.getItem("senssync-sc"),savedLb=localStorage.getItem("senssync-lb");if(raw){const saved:Film[]=JSON.parse(raw);setFilms(saved);setSelected(saved.filter(isSelectable).map(film=>film.id))}if(last)setLastSync(last);if(savedSc)setSc(savedSc);if(savedLb)setLb(savedLb)},[]);
  useEffect(()=>{if(films.length)localStorage.setItem("senssync-films",JSON.stringify(films))},[films]);
@@ -36,7 +37,7 @@ export default function Home(){
 
  async function refresh(){
   if(!sc.trim()||!lb.trim()){setError("Renseigne tes deux profils dans les réglages.");setScreen("settings");return}
-  setLoading(true);setError("");setNotice("");
+  setLoading(true);setError("");setNotice("");setImportReady(false);
   try{
    const nonce=Date.now(),[sr,lr]=await Promise.all([
     fetch(`/api/senscritique?username=${encodeURIComponent(sc)}&refresh=1&_t=${nonce}`,{cache:"no-store"}),
@@ -59,8 +60,7 @@ export default function Home(){
 
  async function prepareOfficialImport(){
   if(!selectedFilms.length){setError("Sélectionne au moins un film à importer.");return}
-  window.open("https://letterboxd.com/import/","_blank","noopener,noreferrer");
-  setLoading(true);setError("");
+  setLoading(true);setError("");setImportReady(false);
   try{
    const hydrated=[...selectedFilms];
    for(let index=0;index<hydrated.length;index++){
@@ -75,8 +75,15 @@ export default function Home(){
    if(!files.diaryCount&&!files.watchlistCount)throw Error("Aucun des films sélectionnés ne peut encore être importé.");
    if(files.diary)downloadCsv("reviewonce-letterboxd-films.csv",files.diary);
    if(files.watchlist)setTimeout(()=>downloadCsv("reviewonce-letterboxd-watchlist.csv",files.watchlist),250);
-   setNotice(files.watchlistCount?"Les fichiers sont prêts. Importe-les dans Letterboxd, puis actualise ReviewOnce.":"Le fichier est prêt. Importe-le dans Letterboxd, puis actualise ReviewOnce.");
+   setImportReady(true);
+   setNotice(files.watchlistCount?"Les fichiers sont téléchargés. Ouvre maintenant Letterboxd dans ton navigateur.":"Le fichier est téléchargé. Ouvre maintenant Letterboxd dans ton navigateur.");
   }catch(e){setError(e instanceof Error?e.message:"L’import n’a pas pu être préparé.")}finally{setLoading(false)}
+ }
+
+ function openLetterboxdImport(){
+  const target=letterboxdImportTarget(navigator.userAgent);
+  if(isAndroid(navigator.userAgent))window.location.href=target;
+  else window.open(target,"_blank","noopener,noreferrer");
  }
 
  function selectCandidate(film:Film,candidate:NonNullable<Film["matchCandidates"]>[number]){setFilms(items=>items.map(item=>item.id===film.id?{...item,tmdbId:candidate.tmdbId,letterboxdUrl:candidate.letterboxdUrl,matchCandidates:[],matchConfidence:candidate.confidence,match:"ready"}:item));setSelected(current=>current.includes(film.id)?current:[...current,film.id]);setSheet(null)}
@@ -89,7 +96,7 @@ export default function Home(){
   <div className="content">
    {screen==="sync"&&<>
     <section className="accountStrip"><div className="account sc"><span>SC</span><div><small>SensCritique</small><strong>{sc?`@${sc}`:"À renseigner"}</strong></div>{sc&&<i/>}</div><div className="linkLine"><span/><Icon name="sync" size={16}/><span/></div><div className="account lb"><span>LB</span><div><small>Letterboxd</small><strong>{lb?`@${lb}`:"À renseigner"}</strong></div>{lb&&<i/>}</div></section>
-    <section className="syncSummary"><div><span className="bigCount">{selectable.length}</span><div><h1>film{selectable.length>1?"s":""} à importer</h1><p>{selectable.length?"Choisis ceux à ajouter à Letterboxd.":"Actualise pour chercher les nouveaux films."}</p></div></div><button onClick={refresh} disabled={loading}><Icon name="sync" size={18}/>{loading?"Actualisation…":"Actualiser"}</button>{error&&<div className="syncError" role="alert"><Icon name="alert" size={17}/><span><strong>Un problème est survenu</strong>{error}</span></div>}{notice&&<div className="syncNotice"><Icon name="alert" size={17}/><span>{notice}</span></div>}</section>
+    <section className="syncSummary"><div><span className="bigCount">{selectable.length}</span><div><h1>film{selectable.length>1?"s":""} à importer</h1><p>{selectable.length?"Choisis ceux à ajouter à Letterboxd.":"Actualise pour chercher les nouveaux films."}</p></div></div><button onClick={refresh} disabled={loading}><Icon name="sync" size={18}/>{loading?"Actualisation…":"Actualiser"}</button>{error&&<div className="syncError" role="alert"><Icon name="alert" size={17}/><span><strong>Un problème est survenu</strong>{error}</span></div>}{notice&&<div className="syncNotice"><Icon name="alert" size={17}/><span>{notice}</span></div>}{importReady&&<div className="importReady"><div><strong>Fichier prêt</strong><span>Le téléchargement est terminé.</span></div><button onClick={openLetterboxdImport}><Icon name="external" size={17}/>{typeof navigator!=="undefined"&&isAndroid(navigator.userAgent)?"Ouvrir dans Chrome":"Ouvrir Letterboxd"}</button></div>}</section>
     {selectable.length>0&&<div className="selectionBar"><button onClick={toggleAll}>{selectedFilms.length===selectable.length?"Tout désélectionner":"Tout sélectionner"}</button><span>{selectedFilms.length} sur {selectable.length}</span></div>}
     <section className="list">
      {!films.length?<div className="emptyState"><div><Icon name="sync" size={28}/></div><h2>Trouve les films à importer</h2><p>ReviewOnce compare tes deux profils et prépare uniquement ce qu’il reste à ajouter.</p><button onClick={refresh}>Comparer mes profils</button></div>:!selectable.length&&!choice.length?<div className="emptyState compact"><div><Icon name="check" size={28}/></div><h2>Tout est à jour</h2><p>Aucun nouveau film à importer pour le moment.</p></div>:selectable.map(film=><article className={`film selectableFilm ${selectedSet.has(film.id)?"selected":""}`} key={film.id}><label className="filmCheckbox" aria-label={`Sélectionner ${film.title}`}><input type="checkbox" checked={selectedSet.has(film.id)} onChange={()=>toggleFilm(film.id)}/><span><Icon name="check" size={15}/></span></label><div className="poster">{film.poster?<img src={film.poster} alt=""/>:<span>{film.title[0]}</span>}</div><div className="filmMain"><h2>{film.title}</h2><p>{film.year}{film.watchedDate&&` · ${new Date(film.watchedDate+"T12:00").toLocaleDateString("fr-FR",{day:"numeric",month:"short"})}`}</p><div className="missingFields">{film.missing?.map(field=><span key={field}>{fieldLabel(field)}</span>)}</div></div></article>)}

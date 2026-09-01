@@ -3,10 +3,22 @@ import assert from"node:assert/strict";
 import{buildOfficialImports,buildSyncQueue,syncKey}from"../src/domain/sync.ts";
 import{compareLibraries}from"../src/domain/compare.ts";
 import type{Film}from"../src/domain/film.ts";
+import{LETTERBOXD_IMPORT_URL,letterboxdImportTarget}from"../src/platform/letterboxd-browser.ts";
 
 const film=(overrides:Partial<Film>={}):Film=>({
  id:"done-1",tmdbId:"123",title:"Film, with comma",year:"2025",rating:8,watchedDate:"2025-08-15",
  review:'Une critique avec "guillemets".',match:"ready",missing:["film"],wished:false,...overrides
+});
+
+test("opens the normal Letterboxd import page outside Android",()=>{
+ assert.equal(letterboxdImportTarget("Mozilla/5.0 (Macintosh)"),LETTERBOXD_IMPORT_URL);
+});
+
+test("forces Chrome for the Letterboxd import page on Android",()=>{
+ const target=letterboxdImportTarget("Mozilla/5.0 (Linux; Android 16; Pixel) AppleWebKit/537.36 Chrome/140 Mobile");
+ assert.match(target,/^intent:\/\/letterboxd\.com\/import\//);
+ assert.match(target,/package=com\.android\.chrome/);
+ assert.match(target,/browser_fallback_url=https%3A%2F%2Fletterboxd\.com%2Fimport%2F/);
 });
 
 test("builds Letterboxd diary CSV with exact TMDB fields and escaping",()=>{
