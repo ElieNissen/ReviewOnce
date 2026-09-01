@@ -1,6 +1,6 @@
 # ReviewOnce
 
-ReviewOnce détecte les films, notes et critiques présents sur SensCritique mais incomplets sur Letterboxd. L’application n’affiche que les différences utiles afin d’éviter la double saisie.
+ReviewOnce détecte les films, notes et critiques loggés sur un profil SensCritique mais incomplets sur Letterboxd. L’application n’affiche que les différences utiles afin d’éviter la double saisie.
 
 ## Fonctionnement actuel
 
@@ -11,8 +11,6 @@ ReviewOnce détecte les films, notes et critiques présents sur SensCritique mai
 - résolution des films par identifiants SensCritique, Wikidata et TMDB ;
 - score de confiance et choix manuel pour les correspondances ambiguës ;
 - cache et limitation des appels pour respecter les plateformes.
-
-ReviewOnce ne demande pas de connexion ChatGPT et ne stocke aucun identifiant de plateforme.
 
 Le jeton TMDB facultatif se configure côté hébergement avec `TMDB_API_TOKEN`. Sans lui, le résolveur utilise Wikidata puis titre original + année. Aucune clé n'est envoyée au navigateur.
 
