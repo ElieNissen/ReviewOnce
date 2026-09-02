@@ -418,3 +418,36 @@ class MainActivity : Activity() {
               );
               if (!input || input.dataset.reviewOnceCapture === '1') return;
               input.dataset.reviewOnceCapture = '1';
+              const save = () => {
+                const username = input.value.trim();
+                if (username) localStorage.setItem('reviewonce-login-username', username);
+              };
+              input.addEventListener('input', save);
+              input.addEventListener('change', save);
+              input.form?.addEventListener('submit', save, true);
+              save();
+            })()
+        """.trimIndent()
+        private val READ_ACCOUNT_SCRIPT = """
+            (() => {
+              const captured = localStorage.getItem('reviewonce-login-username');
+              if (captured) return captured;
+              const selectors = [
+                '.navitem-profile a[href]',
+                'a[href$="/activity/"]',
+                'a[href$="/films/"][data-person]',
+                'a[href*="/profile/"][href]'
+              ];
+              for (const selector of selectors) {
+                const link = document.querySelector(selector);
+                if (!link) continue;
+                const parts = new URL(link.href, location.origin).pathname.split('/').filter(Boolean);
+                if (parts.length && !['film','films','activity','sign-in'].includes(parts[0])) return parts[0];
+              }
+              return '';
+            })()
+        """.trimIndent()
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+}
