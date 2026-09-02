@@ -3,8 +3,15 @@ package info.reviewonce.app
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -22,15 +29,25 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var collectionStore: LocalCollectionStore
     private lateinit var collectionImporter: LetterboxdCollectionImporter
+    private lateinit var exportImporter: LetterboxdExportImporter
     private lateinit var syncController: LetterboxdSyncController
     private lateinit var cancelConnectionButton: Button
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private var connectingToLetterboxd = false
+    private var exportingLetterboxd = false
+    private var exportDownloadId: Long? = null
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
+            if (completedId == exportDownloadId) finishExportDownload(completedId)
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         collectionStore = LocalCollectionStore(this)
+        exportImporter = LetterboxdExportImporter(collectionStore)
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -45,6 +62,16 @@ class MainActivity : Activity() {
             store = collectionStore,
             userAgent = webView.settings.userAgentString,
         )
+        registerReceiver(
+            downloadReceiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            if (android.os.Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0,
+        )
+        webView.setDownloadListener { url, userAgent, _, mimeType, _ ->
+            if (exportingLetterboxd && url.startsWith(LETTERBOXD_URL)) {
+                downloadLetterboxdExport(url, userAgent, mimeType)
+            }
+        }
         syncController = LetterboxdSyncController(
             webView = webView,
             store = collectionStore,
@@ -68,6 +95,7 @@ class MainActivity : Activity() {
                     when (uri.host) {
                         "session" -> sendSession()
                         "connect" -> connectLetterboxd(uri.getQueryParameter("username").orEmpty())
+                        "export" -> openLetterboxdExport()
                         "refresh" -> refreshLocalCollection(uri.getQueryParameter("username").orEmpty())
                         "sync" -> handleSyncRequest()
                         "collection" -> sendLocalCollection()
@@ -134,6 +162,13 @@ class MainActivity : Activity() {
     }
 
     private fun handleLetterboxdPage(url: String) {
+        if (exportingLetterboxd) {
+            cancelConnectionButton.visibility = View.VISIBLE
+            if (!isSignInPage(url) && !url.startsWith(LETTERBOXD_DATA_URL)) {
+                webView.loadUrl(LETTERBOXD_DATA_URL)
+            }
+            return
+        }
         if (!connectingToLetterboxd) return
         cancelConnectionButton.visibility = View.VISIBLE
         if (isSignInPage(url)) {
@@ -158,6 +193,7 @@ class MainActivity : Activity() {
 
     private fun cancelLetterboxdConnection() {
         connectingToLetterboxd = false
+        exportingLetterboxd = false
         cancelConnectionButton.visibility = View.GONE
         webView.loadUrl(REVIEW_ONCE_URL)
         webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
@@ -206,6 +242,76 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun openLetterboxdExport() {
+        exportingLetterboxd = true
+        cancelConnectionButton.text = "Retour à ReviewOnce"
+        cancelConnectionButton.visibility = View.VISIBLE
+        webView.loadUrl(LETTERBOXD_DATA_URL)
+    }
+
+    private fun downloadLetterboxdExport(
+        url: String,
+        userAgent: String,
+        mimeType: String,
+    ) {
+        val request = DownloadManager.Request(Uri.parse(url)).apply {
+            setMimeType(mimeType.ifBlank { "application/zip" })
+            setTitle("Bibliothèque Letterboxd")
+            setDescription("Import dans ReviewOnce")
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+            setDestinationInExternalFilesDir(
+                this@MainActivity,
+                Environment.DIRECTORY_DOWNLOADS,
+                "letterboxd-export-${System.currentTimeMillis()}.zip",
+            )
+            addRequestHeader("User-Agent", userAgent)
+            addRequestHeader("Referer", LETTERBOXD_DATA_URL)
+            CookieManager.getInstance().getCookie(LETTERBOXD_URL)?.let { addRequestHeader("Cookie", it) }
+        }
+        val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        exportDownloadId = manager.enqueue(request)
+        cancelConnectionButton.text = "Import en cours…"
+    }
+
+    private fun finishExportDownload(downloadId: Long) {
+        val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        manager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
+            if (!cursor.moveToFirst()) return
+            val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                returnToReviewOnce("collection-error", "Le téléchargement Letterboxd a échoué. Réessaie depuis l’application.")
+                return
+            }
+            val localUri = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+            val result = runCatching {
+                contentResolver.openInputStream(Uri.parse(localUri)).use { input ->
+                    requireNotNull(input) { "Fichier téléchargé introuvable." }
+                    exportImporter.import(input)
+                }
+            }
+            result.fold(
+                onSuccess = { count -> returnToReviewOnce("collection-complete", "$count films Letterboxd importés", count) },
+                onFailure = { error -> returnToReviewOnce("collection-error", error.message ?: "Export Letterboxd illisible.") },
+            )
+        }
+    }
+
+    private fun returnToReviewOnce(type: String, message: String, count: Int? = null) {
+        exportingLetterboxd = false
+        exportDownloadId = null
+        cancelConnectionButton.text = "Retour à ReviewOnce"
+        cancelConnectionButton.visibility = View.GONE
+        webView.loadUrl(REVIEW_ONCE_URL)
+        webView.postDelayed({
+            sendNativeEvent(
+                type = type,
+                message = message,
+                collection = if (type == "collection-complete") collectionStore.collectionJson() else null,
+                collectionCount = count,
+            )
+        }, CALLBACK_DELAY_MS)
+    }
+
     private fun handleSyncRequest() {
         webView.evaluateJavascript("localStorage.getItem('reviewonce-android-payload') || ''") { raw ->
             val payload = decodeJavascriptString(raw)
@@ -231,7 +337,11 @@ class MainActivity : Activity() {
     }
 
     private fun sendLocalCollection() {
-        sendNativeEvent(type = "collection", collection = collectionStore.collectionJson())
+        sendNativeEvent(
+            type = "collection",
+            collection = collectionStore.collectionJson(),
+            collectionCount = collectionStore.countEntries(),
+        )
     }
 
     private fun sendNativeEvent(
@@ -284,6 +394,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(downloadReceiver)
         webView.destroy()
         collectionImporter.close()
         collectionStore.close()
@@ -294,6 +405,7 @@ class MainActivity : Activity() {
         private const val REVIEW_ONCE_URL = "https://senssync-films.hushed-plume-0999.chatgpt.site/"
         private const val LETTERBOXD_URL = "https://letterboxd.com/"
         private const val LETTERBOXD_SIGN_IN_URL = "https://letterboxd.com/sign-in/"
+        private const val LETTERBOXD_DATA_URL = "https://letterboxd.com/settings/data/"
         private const val PREFERENCES = "reviewonce-local"
         private const val LETTERBOXD_USERNAME = "letterboxd-username"
         private const val PENDING_LETTERBOXD_USERNAME = "pending-letterboxd-username"
@@ -306,36 +418,3 @@ class MainActivity : Activity() {
               );
               if (!input || input.dataset.reviewOnceCapture === '1') return;
               input.dataset.reviewOnceCapture = '1';
-              const save = () => {
-                const username = input.value.trim();
-                if (username) localStorage.setItem('reviewonce-login-username', username);
-              };
-              input.addEventListener('input', save);
-              input.addEventListener('change', save);
-              input.form?.addEventListener('submit', save, true);
-              save();
-            })()
-        """.trimIndent()
-        private val READ_ACCOUNT_SCRIPT = """
-            (() => {
-              const captured = localStorage.getItem('reviewonce-login-username');
-              if (captured) return captured;
-              const selectors = [
-                '.navitem-profile a[href]',
-                'a[href$="/activity/"]',
-                'a[href$="/films/"][data-person]',
-                'a[href*="/profile/"][href]'
-              ];
-              for (const selector of selectors) {
-                const link = document.querySelector(selector);
-                if (!link) continue;
-                const parts = new URL(link.href, location.origin).pathname.split('/').filter(Boolean);
-                if (parts.length && !['film','films','activity','sign-in'].includes(parts[0])) return parts[0];
-              }
-              return '';
-            })()
-        """.trimIndent()
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-}
