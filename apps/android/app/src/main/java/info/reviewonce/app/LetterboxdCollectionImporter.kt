@@ -109,12 +109,14 @@ class LetterboxdCollectionImporter(
             connection.disconnect()
             throw LetterboxdHttpException(status)
         }
+        val finalUrl = connection.url.toString()
+        if (isSignInUrl(finalUrl)) {
+            connection.disconnect()
+            throw IllegalStateException("Ta session Letterboxd a expiré. Reconnecte ton compte.")
+        }
         connection.headerFields["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(BASE, it) }
         val document = connection.inputStream.bufferedReader().use { Jsoup.parse(it.readText(), url) }
         connection.disconnect()
-        check(document.selectFirst("form[action*='sign-in'], input[name='password']") == null) {
-            "Ta session Letterboxd a expiré. Reconnecte ton compte."
-        }
         return document
     }
 
@@ -163,6 +165,9 @@ class LetterboxdCollectionImporter(
     }
 
     private fun hasNextPage(document: Document) = document.selectFirst("a[rel=next], .paginate-next a, a.next") != null
+
+    private fun isSignInUrl(url: String): Boolean =
+        url.contains("/sign-in", ignoreCase = true) || url.contains("/account/login", ignoreCase = true)
 
     companion object {
         private const val BASE = "https://letterboxd.com"
