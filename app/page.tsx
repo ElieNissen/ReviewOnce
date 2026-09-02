@@ -41,7 +41,7 @@ export default function Home(){
  const selectedSet=new Set(selected),selectedFilms=selectable.filter(film=>selectedSet.has(film.id));
 
  function refreshNativeCollection(username:string){return new Promise<Film[]>((resolve,reject)=>{nativeResolve.current=resolve;nativeReject.current=reject;nativeTimer.current=window.setTimeout(()=>{nativeResolve.current=null;nativeReject.current=null;reject(Error("L’actualisation Letterboxd prend trop de temps. Réessaie dans un instant."))},300000);window.location.href=`reviewonce://refresh?username=${encodeURIComponent(username)}`})}
- function connectLetterboxd(){setError("");setNotice("Connecte-toi une seule fois, puis ReviewOnce reviendra automatiquement.");window.location.href="reviewonce://connect"}
+ function connectLetterboxd(){setError("");setNotice("Connecte-toi une seule fois, puis ReviewOnce reviendra automatiquement.");window.location.href=`reviewonce://connect?username=${encodeURIComponent(lb.trim())}`}
 
  async function refresh(){
   if(!sc.trim()||!lb.trim()){setError("Renseigne tes deux profils dans les réglages.");setScreen("settings");return}
