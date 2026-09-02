@@ -15,6 +15,7 @@ import android.os.Environment
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.CookieManager
 import android.webkit.SafeBrowsingResponse
 import android.webkit.WebResourceRequest
@@ -22,16 +23,21 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import org.json.JSONObject
 import org.json.JSONTokener
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
+    private lateinit var letterboxdView: WebView
+    private lateinit var collectorView: WebView
+    private lateinit var letterboxdOverlay: FrameLayout
     private lateinit var collectionStore: LocalCollectionStore
     private lateinit var collectionImporter: LetterboxdCollectionImporter
     private lateinit var exportImporter: LetterboxdExportImporter
     private lateinit var syncController: LetterboxdSyncController
-    private lateinit var cancelConnectionButton: Button
+    private lateinit var letterboxdTitle: TextView
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private var connectingToLetterboxd = false
     private var exportingLetterboxd = false
@@ -55,19 +61,26 @@ class MainActivity : Activity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.2.1"
+            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.2.2"
             WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         }
+        val browserUserAgent = webView.settings.userAgentString.replace(Regex("\\s+ReviewOnceAndroid/\\S+"), "")
+        letterboxdView = createLetterboxdWebView(browserUserAgent)
+        collectorView = createLetterboxdWebView(browserUserAgent).apply {
+            alpha = 0f
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
         collectionImporter = LetterboxdCollectionImporter(
+            webView = collectorView,
             store = collectionStore,
-            userAgent = webView.settings.userAgentString,
         )
         registerReceiver(
             downloadReceiver,
             IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
             if (android.os.Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0,
         )
-        webView.setDownloadListener { url, userAgent, _, mimeType, _ ->
+        letterboxdView.setDownloadListener { url, userAgent, _, mimeType, _ ->
             if (exportingLetterboxd && url.startsWith(LETTERBOXD_URL)) {
                 downloadLetterboxdExport(url, userAgent, mimeType)
             }
@@ -109,7 +122,6 @@ class MainActivity : Activity() {
                 super.onPageFinished(view, url)
                 if (syncController.onPageFinished(url)) return
                 CookieManager.getInstance().flush()
-                if (url.startsWith(LETTERBOXD_URL)) handleLetterboxdPage(url)
             }
 
             override fun onSafeBrowsingHit(
@@ -122,34 +134,123 @@ class MainActivity : Activity() {
             }
         }
 
+        letterboxdView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                request.url.scheme != "https" || request.url.host?.endsWith("letterboxd.com") != true
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                CookieManager.getInstance().flush()
+                if (url.startsWith(LETTERBOXD_URL)) handleLetterboxdPage(url)
+            }
+        }
+
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, false)
-        }
-
-        cancelConnectionButton = Button(this).apply {
-            text = "Retour à ReviewOnce"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(35, 40, 45))
-            visibility = View.GONE
-            setOnClickListener { cancelLetterboxdConnection() }
+            setAcceptThirdPartyCookies(letterboxdView, false)
+            setAcceptThirdPartyCookies(collectorView, false)
         }
         val root = FrameLayout(this).apply {
             addView(webView, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ))
-            addView(cancelConnectionButton, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(44),
-                Gravity.TOP or Gravity.END,
-            ).apply { setMargins(dp(8), dp(8), dp(8), 0) })
+            addView(collectorView, FrameLayout.LayoutParams(dp(1), dp(1), Gravity.BOTTOM or Gravity.END))
         }
+        letterboxdOverlay = buildLetterboxdOverlay()
+        root.addView(letterboxdOverlay, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
         setContentView(root)
         // Letterboxd is only a temporary authentication surface. Every app launch
         // starts from ReviewOnce, even if Android killed the activity mid-login.
         webView.loadUrl(REVIEW_ONCE_URL)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createLetterboxdWebView(userAgent: String) = WebView(this).apply {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        settings.userAgentString = userAgent
+    }
+
+    private fun buildLetterboxdOverlay(): FrameLayout {
+        letterboxdTitle = TextView(this).apply {
+            text = "Connexion à Letterboxd"
+            textSize = 16f
+            setTextColor(Color.rgb(245, 247, 248))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(8), 0)
+        }
+        val closeButton = Button(this).apply {
+            text = "Fermer"
+            textSize = 14f
+            minWidth = dp(72)
+            minHeight = dp(48)
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(45, 52, 58))
+            setOnClickListener { cancelLetterboxdConnection() }
+        }
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(24, 29, 33))
+            addView(letterboxdTitle, LinearLayout.LayoutParams(0, dp(56), 1f))
+            addView(closeButton, LinearLayout.LayoutParams(dp(88), dp(48)).apply {
+                marginEnd = dp(8)
+            })
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(24, 29, 33))
+            addView(toolbar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+            addView(letterboxdView, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ))
+        }
+        return FrameLayout(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(Color.rgb(24, 29, 33))
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            setOnApplyWindowInsetsListener { view, insets ->
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    val bars =
+                    insets.getInsets(WindowInsets.Type.systemBars())
+                    view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                } else {
+                    @Suppress("DEPRECATION")
+                    view.setPadding(
+                        insets.systemWindowInsetLeft,
+                        insets.systemWindowInsetTop,
+                        insets.systemWindowInsetRight,
+                        insets.systemWindowInsetBottom,
+                    )
+                }
+                insets
+            }
+        }
+    }
+
+    private fun showLetterboxdOverlay(title: String) {
+        letterboxdTitle.text = title
+        letterboxdOverlay.visibility = View.VISIBLE
+        letterboxdOverlay.bringToFront()
+        letterboxdOverlay.requestApplyInsets()
+    }
+
+    private fun hideLetterboxdOverlay() {
+        letterboxdView.stopLoading()
+        letterboxdOverlay.visibility = View.GONE
     }
 
     private fun connectLetterboxd(usernameHint: String) {
@@ -157,25 +258,24 @@ class MainActivity : Activity() {
         if (usernameHint.isNotBlank()) {
             preferences.edit().putString(PENDING_LETTERBOXD_USERNAME, usernameHint).apply()
         }
-        cancelConnectionButton.visibility = View.VISIBLE
-        webView.loadUrl(LETTERBOXD_SIGN_IN_URL)
+        showLetterboxdOverlay("Connexion à Letterboxd")
+        letterboxdView.loadUrl(LETTERBOXD_SIGN_IN_URL)
     }
 
     private fun handleLetterboxdPage(url: String) {
         if (exportingLetterboxd) {
-            cancelConnectionButton.visibility = View.VISIBLE
+            showLetterboxdOverlay("Importer la bibliothèque")
             if (!isSignInPage(url) && !url.startsWith(LETTERBOXD_DATA_URL)) {
-                webView.loadUrl(LETTERBOXD_DATA_URL)
+                letterboxdView.loadUrl(LETTERBOXD_DATA_URL)
             }
             return
         }
         if (!connectingToLetterboxd) return
-        cancelConnectionButton.visibility = View.VISIBLE
         if (isSignInPage(url)) {
-            webView.evaluateJavascript(CAPTURE_LOGIN_USERNAME_SCRIPT, null)
+            letterboxdView.evaluateJavascript(CAPTURE_LOGIN_USERNAME_SCRIPT, null)
             return
         }
-        webView.evaluateJavascript(READ_ACCOUNT_SCRIPT) { raw ->
+        letterboxdView.evaluateJavascript(READ_ACCOUNT_SCRIPT) { raw ->
             val username = decodeJavascriptString(raw)
                 .ifBlank { preferences.getString(PENDING_LETTERBOXD_USERNAME, "").orEmpty() }
             if (username.isBlank()) return@evaluateJavascript
@@ -185,8 +285,7 @@ class MainActivity : Activity() {
                 .remove(PENDING_LETTERBOXD_USERNAME)
                 .apply()
             connectingToLetterboxd = false
-            cancelConnectionButton.visibility = View.GONE
-            webView.loadUrl(REVIEW_ONCE_URL)
+            hideLetterboxdOverlay()
             webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
         }
     }
@@ -194,8 +293,7 @@ class MainActivity : Activity() {
     private fun cancelLetterboxdConnection() {
         connectingToLetterboxd = false
         exportingLetterboxd = false
-        cancelConnectionButton.visibility = View.GONE
-        webView.loadUrl(REVIEW_ONCE_URL)
+        hideLetterboxdOverlay()
         webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
     }
 
@@ -244,9 +342,8 @@ class MainActivity : Activity() {
 
     private fun openLetterboxdExport() {
         exportingLetterboxd = true
-        cancelConnectionButton.text = "Retour à ReviewOnce"
-        cancelConnectionButton.visibility = View.VISIBLE
-        webView.loadUrl(LETTERBOXD_DATA_URL)
+        showLetterboxdOverlay("Importer la bibliothèque")
+        letterboxdView.loadUrl(LETTERBOXD_DATA_URL)
     }
 
     private fun downloadLetterboxdExport(
@@ -270,7 +367,7 @@ class MainActivity : Activity() {
         }
         val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
         exportDownloadId = manager.enqueue(request)
-        cancelConnectionButton.text = "Import en cours…"
+        letterboxdTitle.text = "Import en cours…"
     }
 
     private fun finishExportDownload(downloadId: Long) {
@@ -299,9 +396,7 @@ class MainActivity : Activity() {
     private fun returnToReviewOnce(type: String, message: String, count: Int? = null) {
         exportingLetterboxd = false
         exportDownloadId = null
-        cancelConnectionButton.text = "Retour à ReviewOnce"
-        cancelConnectionButton.visibility = View.GONE
-        webView.loadUrl(REVIEW_ONCE_URL)
+        hideLetterboxdOverlay()
         webView.postDelayed({
             sendNativeEvent(
                 type = type,
@@ -373,18 +468,20 @@ class MainActivity : Activity() {
     override fun onPause() {
         CookieManager.getInstance().flush()
         webView.onPause()
+        letterboxdView.onPause()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
         webView.onResume()
+        letterboxdView.onResume()
         if (webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) webView.postDelayed({ sendSession() }, 300)
     }
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
-        if (webView.url.orEmpty().startsWith(LETTERBOXD_URL)) {
+        if (letterboxdOverlay.visibility == View.VISIBLE) {
             cancelLetterboxdConnection()
         } else if (webView.canGoBack()) {
             webView.goBack()
@@ -395,8 +492,10 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         unregisterReceiver(downloadReceiver)
-        webView.destroy()
         collectionImporter.close()
+        webView.destroy()
+        letterboxdView.destroy()
+        collectorView.destroy()
         collectionStore.close()
         super.onDestroy()
     }

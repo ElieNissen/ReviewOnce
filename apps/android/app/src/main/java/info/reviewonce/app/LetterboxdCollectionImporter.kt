@@ -1,170 +1,173 @@
 package info.reviewonce.app
 
+import android.annotation.SuppressLint
 import android.webkit.CookieManager
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.random.Random
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import org.json.JSONArray
+import org.json.JSONObject
+import org.json.JSONTokener
 
+/** Reads Letterboxd through Chromium with the user's local session. */
 class LetterboxdCollectionImporter(
+    private val webView: WebView,
     private val store: LocalCollectionStore,
-    private val userAgent: String,
 ) {
-    private val executor = Executors.newSingleThreadExecutor()
-    private val importing = AtomicBoolean(false)
-    private val networkUserAgent = userAgent.replace(ANDROID_UA_SUFFIX, "")
+    private data class Section(val path: String, val label: String, val kind: String)
 
+    private val sections = listOf(
+        Section("films/", "films", "films"),
+        Section("watchlist/", "watchlist", "watchlist"),
+        Section("films/reviews/", "critiques", "reviews"),
+        Section("films/diary/", "journal", "diary"),
+    )
+    private val entries = linkedMapOf<String, LocalLetterboxdEntry>()
+    private var username = ""
+    private var sectionIndex = 0
+    private var page = 1
+    private var importing = false
+    private var onProgress: ((String) -> Unit)? = null
+    private var onComplete: ((Result<Int>) -> Unit)? = null
+
+    init {
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                request.url.host?.endsWith("letterboxd.com") != true
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                if (!importing) return
+                CookieManager.getInstance().flush()
+                if (isSignInUrl(url)) {
+                    finish(Result.failure(IllegalStateException("Reconnecte ton compte Letterboxd pour continuer.")))
+                    return
+                }
+                if (!url.startsWith(BASE)) {
+                    finish(Result.failure(IllegalStateException("Letterboxd n’a pas ouvert la bibliothèque attendue.")))
+                    return
+                }
+                view.postDelayed({ extractCurrentPage() }, PAGE_SETTLE_MS)
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView,
+                request: WebResourceRequest,
+                errorResponse: android.webkit.WebResourceResponse,
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (importing && request.isForMainFrame && errorResponse.statusCode >= 400) {
+                    finish(Result.failure(IllegalStateException(
+                        if (errorResponse.statusCode == 403 || errorResponse.statusCode == 429)
+                            "Letterboxd demande une vérification dans son navigateur."
+                        else "Letterboxd a répondu ${errorResponse.statusCode}."
+                    )))
+                }
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                super.onReceivedError(view, request, error)
+                if (importing && request.isForMainFrame) {
+                    finish(Result.failure(IllegalStateException("ReviewOnce n’arrive pas à joindre Letterboxd. Vérifie ta connexion.")))
+                }
+            }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
     fun import(username: String, onProgress: (String) -> Unit, onComplete: (Result<Int>) -> Unit) {
-        if (!importing.compareAndSet(false, true)) {
+        if (importing) {
             onComplete(Result.failure(IllegalStateException("Une actualisation est déjà en cours.")))
             return
         }
-        executor.execute {
-            val result = try {
-                runCatching {
-                    require(USERNAME.matches(username)) { "Nom de profil Letterboxd invalide" }
-                    val entries = linkedMapOf<String, LocalLetterboxdEntry>()
-                    scan("$BASE/$username/films/", "collection", onProgress) { document ->
-                        parsePosters(document).forEach { merge(entries, it) }
-                    }
-                    scan("$BASE/$username/watchlist/", "watchlist", onProgress) { document ->
-                        parsePosters(document).forEach { merge(entries, it.copy(inWatchlist = true)) }
-                    }
-                    scan("$BASE/$username/films/reviews/", "critiques", onProgress) { document ->
-                        parsePosters(document).forEach { merge(entries, it.copy(hasReview = true)) }
-                    }
-                    scan("$BASE/$username/films/diary/", "journal", onProgress) { document ->
-                        parseDiary(document).forEach { merge(entries, it) }
-                    }
-                    check(entries.isNotEmpty()) { "Aucun film trouvé. Vérifie le profil Letterboxd." }
-                    store.replaceCollection(entries.values)
-                    entries.size
-                }
-            } finally {
-                importing.set(false)
+        if (!USERNAME.matches(username)) {
+            onComplete(Result.failure(IllegalArgumentException("Nom de profil Letterboxd invalide.")))
+            return
+        }
+        if (CookieManager.getInstance().getCookie(BASE).isNullOrBlank()) {
+            onComplete(Result.failure(IllegalStateException("Reconnecte ton compte Letterboxd pour continuer.")))
+            return
+        }
+        this.username = username
+        this.onProgress = onProgress
+        this.onComplete = onComplete
+        entries.clear()
+        sectionIndex = 0
+        page = 1
+        importing = true
+        loadCurrentPage()
+    }
+
+    fun close() {
+        importing = false
+        onProgress = null
+        onComplete = null
+        webView.stopLoading()
+    }
+
+    private fun loadCurrentPage() {
+        if (!importing) return
+        if (sectionIndex >= sections.size) {
+            if (entries.isEmpty()) {
+                finish(Result.failure(IllegalStateException("Aucun film trouvé dans cette bibliothèque Letterboxd.")))
+            } else {
+                store.replaceCollection(entries.values)
+                finish(Result.success(entries.size))
             }
-            onComplete(result)
+            return
+        }
+        val section = sections[sectionIndex]
+        onProgress?.invoke("Récupération de ta bibliothèque · ${section.label} ${page}")
+        val suffix = if (page == 1) section.path else "${section.path}page/$page/"
+        webView.loadUrl("$BASE/$username/$suffix")
+    }
+
+    private fun extractCurrentPage() {
+        if (!importing) return
+        val kind = sections[sectionIndex].kind
+        webView.evaluateJavascript(EXTRACT_PAGE_SCRIPT.replace("__KIND__", JSONObject.quote(kind))) { raw ->
+            if (!importing) return@evaluateJavascript
+            runCatching { parsePage(raw) }.fold(
+                onSuccess = { hasNext ->
+                    if (hasNext && page < MAX_PAGES) page += 1 else { sectionIndex += 1; page = 1 }
+                    webView.postDelayed({ loadCurrentPage() }, REQUEST_DELAY_MS)
+                },
+                onFailure = { error ->
+                    finish(Result.failure(IllegalStateException(
+                        if (error.message == "Blocked") "Letterboxd demande une vérification dans son navigateur."
+                        else "Letterboxd a changé la présentation de sa bibliothèque."
+                    )))
+                },
+            )
         }
     }
 
-    fun close() = executor.shutdownNow()
-
-    private fun scan(baseUrl: String, label: String, onProgress: (String) -> Unit, consume: (Document) -> Unit) {
-        var previousUrl = BASE
-        for (page in 1..MAX_PAGES) {
-            onProgress("Lecture $label · page $page")
-            val url = if (page == 1) baseUrl else "${baseUrl}page/$page/"
-            val document = fetchWithRetry(url, previousUrl) { seconds ->
-                onProgress("Connexion à Letterboxd · nouvel essai dans ${seconds}s")
-            }
-            consume(document)
-            if (!hasNextPage(document)) break
-            previousUrl = url
-            Thread.sleep(REQUEST_DELAY_MS + Random.nextLong(0, REQUEST_JITTER_MS))
-        }
+    private fun parsePage(raw: String): Boolean {
+        val encoded = JSONTokener(raw).nextValue() as? String ?: error("Invalid JavaScript response")
+        val result = JSONObject(encoded)
+        if (result.optBoolean("blocked")) error("Blocked")
+        val items = result.optJSONArray("items") ?: JSONArray()
+        for (index in 0 until items.length()) merge(items.getJSONObject(index).toEntry())
+        return result.optBoolean("next")
     }
 
-    private fun fetchWithRetry(url: String, referer: String, onRetry: (Long) -> Unit): Document {
-        for (attempt in 0..RETRY_DELAYS_SECONDS.size) {
-            try {
-                return fetch(url, referer)
-            } catch (error: LetterboxdHttpException) {
-                if (error.status !in RETRYABLE_STATUSES || attempt == RETRY_DELAYS_SECONDS.size) {
-                    throw IllegalStateException(
-                        if (error.status in RETRYABLE_STATUSES) {
-                            "Letterboxd limite encore la lecture. Attends quelques minutes puis réessaie."
-                        } else {
-                            "Letterboxd a répondu ${error.status}"
-                        },
-                    )
-                }
-                val delay = RETRY_DELAYS_SECONDS[attempt]
-                onRetry(delay)
-                Thread.sleep(delay * 1_000)
-            } catch (error: IOException) {
-                if (attempt == RETRY_DELAYS_SECONDS.size) {
-                    throw IllegalStateException(
-                        "ReviewOnce n’arrive pas à joindre Letterboxd. Vérifie ta connexion, puis réessaie.",
-                        error,
-                    )
-                }
-                val delay = RETRY_DELAYS_SECONDS[attempt]
-                onRetry(delay)
-                Thread.sleep(delay * 1_000)
-            }
-        }
-        error("Lecture Letterboxd impossible")
+    private fun JSONObject.toEntry(): LocalLetterboxdEntry {
+        val slug = getString("slug")
+        return LocalLetterboxdEntry(
+            slug = slug,
+            title = optString("title").ifBlank { slug },
+            year = optString("year").ifBlank { null },
+            rating10 = if (has("rating") && !isNull("rating")) optInt("rating") else null,
+            watchedDate = optString("date").take(10).ifBlank { null },
+            hasReview = optBoolean("review"),
+            inWatchlist = optBoolean("watchlist"),
+        )
     }
 
-    private fun fetch(url: String, referer: String): Document {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 20_000
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", networkUserAgent)
-        connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        connection.setRequestProperty("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
-        connection.setRequestProperty("Referer", referer)
-        connection.setRequestProperty("Upgrade-Insecure-Requests", "1")
-        connection.setRequestProperty("Sec-Fetch-Site", "same-origin")
-        connection.setRequestProperty("Sec-Fetch-Mode", "navigate")
-        connection.setRequestProperty("Sec-Fetch-Dest", "document")
-        CookieManager.getInstance().getCookie(BASE)?.let { connection.setRequestProperty("Cookie", it) }
-        val status = connection.responseCode
-        if (status !in 200..299) {
-            connection.disconnect()
-            throw LetterboxdHttpException(status)
-        }
-        val finalUrl = connection.url.toString()
-        if (isSignInUrl(finalUrl)) {
-            connection.disconnect()
-            throw IllegalStateException("Ta session Letterboxd a expiré. Reconnecte ton compte.")
-        }
-        connection.headerFields["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(BASE, it) }
-        val document = connection.inputStream.bufferedReader().use { Jsoup.parse(it.readText(), url) }
-        connection.disconnect()
-        return document
-    }
-
-    private fun parsePosters(document: Document): List<LocalLetterboxdEntry> = document
-        .select("[data-item-slug], [data-film-slug]")
-        .mapNotNull(::posterEntry)
-        .distinctBy { it.slug }
-
-    private fun posterEntry(element: Element): LocalLetterboxdEntry? {
-        val slug = element.attr("data-item-slug").ifBlank { element.attr("data-film-slug") }
-        if (slug.isBlank()) return null
-        val rawTitle = element.attr("data-item-name").ifBlank {
-            element.attr("data-film-name").ifBlank { element.attr("data-item-full-display-name") }
-        }
-        val year = element.attr("data-item-year").ifBlank {
-            element.attr("data-film-release-year").ifBlank { YEAR.find(rawTitle)?.value.orEmpty() }
-        }
-        val title = rawTitle.replace(Regex("\\s*\\(\\d{4}\\)\\s*$"), "").trim().ifBlank { slug }
-        val classes = generateSequence(element) { it.parent() }.take(4).joinToString(" ") { it.className() }
-        val rating = RATING.find(classes)?.groupValues?.get(1)?.toIntOrNull()
-        return LocalLetterboxdEntry(slug = slug, title = title, year = year.ifBlank { null }, rating10 = rating)
-    }
-
-    private fun parseDiary(document: Document): List<LocalLetterboxdEntry> = document
-        .select("tr[data-film-slug], .diary-entry-row, .diary-entry")
-        .mapNotNull { row ->
-            val poster = row.selectFirst("[data-item-slug], [data-film-slug]") ?: row
-            val base = posterEntry(poster) ?: return@mapNotNull null
-            val date = row.selectFirst("time[datetime]")?.attr("datetime")?.take(10)
-                ?: row.attr("data-viewing-date").take(10).ifBlank { null }
-            base.copy(watchedDate = date)
-        }
-        .distinctBy { it.slug }
-
-    private fun merge(target: MutableMap<String, LocalLetterboxdEntry>, next: LocalLetterboxdEntry) {
-        val current = target[next.slug]
-        target[next.slug] = if (current == null) next else current.copy(
+    private fun merge(next: LocalLetterboxdEntry) {
+        val current = entries[next.slug]
+        entries[next.slug] = if (current == null) next else current.copy(
             title = if (current.title == current.slug) next.title else current.title,
             year = current.year ?: next.year,
             rating10 = current.rating10 ?: next.rating10,
@@ -175,7 +178,15 @@ class LetterboxdCollectionImporter(
         )
     }
 
-    private fun hasNextPage(document: Document) = document.selectFirst("a[rel=next], .paginate-next a, a.next") != null
+    private fun finish(result: Result<Int>) {
+        if (!importing) return
+        importing = false
+        webView.stopLoading()
+        val callback = onComplete
+        onProgress = null
+        onComplete = null
+        callback?.invoke(result)
+    }
 
     private fun isSignInUrl(url: String): Boolean =
         url.contains("/sign-in", ignoreCase = true) || url.contains("/account/login", ignoreCase = true)
@@ -183,15 +194,34 @@ class LetterboxdCollectionImporter(
     companion object {
         private const val BASE = "https://letterboxd.com"
         private const val MAX_PAGES = 200
-        private const val REQUEST_DELAY_MS = 1_500L
-        private const val REQUEST_JITTER_MS = 700L
-        private val RETRY_DELAYS_SECONDS = longArrayOf(5, 20, 60)
-        private val RETRYABLE_STATUSES = setOf(403, 429, 500, 502, 503, 504)
-        private val ANDROID_UA_SUFFIX = Regex("\\s+ReviewOnceAndroid/\\S+")
+        private const val PAGE_SETTLE_MS = 450L
+        private const val REQUEST_DELAY_MS = 700L
         private val USERNAME = Regex("^[A-Za-z0-9_-]{2,40}$")
-        private val YEAR = Regex("(?<!\\d)(?:18|19|20)\\d{2}(?!\\d)")
-        private val RATING = Regex("(?:^|\\s)rated-(10|[1-9])(?:\\s|$)")
-    }
 
-    private class LetterboxdHttpException(val status: Int) : IllegalStateException()
+        private val EXTRACT_PAGE_SCRIPT = """
+            (() => {
+              const kind = __KIND__;
+              const blocked = /just a moment|attention required|verify you are human/i.test(document.title + ' ' + document.body.innerText.slice(0, 300));
+              const map = new Map();
+              const add = (node, row) => {
+                const slug = node.dataset.itemSlug || node.dataset.filmSlug || row?.dataset?.filmSlug || '';
+                if (!slug) return;
+                const rawTitle = node.dataset.itemName || node.dataset.filmName || node.dataset.itemFullDisplayName || node.querySelector('img')?.alt || slug;
+                const title = rawTitle.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+                const year = node.dataset.itemYear || node.dataset.filmReleaseYear || (rawTitle.match(/\((\d{4})\)\s*$/)?.[1] || '');
+                const scope = row || node.closest('li, tr, article') || node;
+                const classes = [node.className, scope.className, ...Array.from(scope.querySelectorAll('[class*="rated-"]')).map(el => el.className)].join(' ');
+                const rating = Number(classes.match(/(?:^|\s)rated-(10|[1-9])(?:\s|$)/)?.[1] || 0) || null;
+                const date = scope.querySelector('time[datetime]')?.getAttribute('datetime')?.slice(0, 10) || scope.dataset.viewingDate || '';
+                map.set(slug, {slug, title, year, rating, date, review: kind === 'reviews', watchlist: kind === 'watchlist'});
+              };
+              if (kind === 'diary') {
+                document.querySelectorAll('tr[data-film-slug], .diary-entry-row, .diary-entry').forEach(row => add(row.querySelector('[data-item-slug], [data-film-slug]') || row, row));
+              } else {
+                document.querySelectorAll('[data-item-slug], [data-film-slug]').forEach(node => add(node, null));
+              }
+              return JSON.stringify({blocked, items: Array.from(map.values()), next: Boolean(document.querySelector('a[rel="next"], .paginate-next a, a.next'))});
+            })()
+        """.trimIndent()
+    }
 }
