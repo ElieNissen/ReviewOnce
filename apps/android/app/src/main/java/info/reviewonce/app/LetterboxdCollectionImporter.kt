@@ -4,6 +4,7 @@ import android.webkit.CookieManager
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
@@ -59,7 +60,7 @@ class LetterboxdCollectionImporter(
             onProgress("Lecture $label · page $page")
             val url = if (page == 1) baseUrl else "${baseUrl}page/$page/"
             val document = fetchWithRetry(url, previousUrl) { seconds ->
-                onProgress("Letterboxd temporise · nouvel essai dans ${seconds}s")
+                onProgress("Connexion à Letterboxd · nouvel essai dans ${seconds}s")
             }
             consume(document)
             if (!hasNextPage(document)) break
@@ -80,6 +81,16 @@ class LetterboxdCollectionImporter(
                         } else {
                             "Letterboxd a répondu ${error.status}"
                         },
+                    )
+                }
+                val delay = RETRY_DELAYS_SECONDS[attempt]
+                onRetry(delay)
+                Thread.sleep(delay * 1_000)
+            } catch (error: IOException) {
+                if (attempt == RETRY_DELAYS_SECONDS.size) {
+                    throw IllegalStateException(
+                        "ReviewOnce n’arrive pas à joindre Letterboxd. Vérifie ta connexion, puis réessaie.",
+                        error,
                     )
                 }
                 val delay = RETRY_DELAYS_SECONDS[attempt]
