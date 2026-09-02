@@ -172,6 +172,7 @@ class MainActivity : Activity() {
             type = "session",
             username = username,
             connected = preferences.getBoolean(LETTERBOXD_CONNECTED, false) && username.isNotBlank(),
+            collectionCount = collectionStore.countEntries(),
         )
     }
 
@@ -191,6 +192,7 @@ class MainActivity : Activity() {
                             type = "collection-complete",
                             message = "$count films Letterboxd vérifiés",
                             collection = collectionStore.collectionJson(),
+                            collectionCount = count,
                         )
                     },
                     onFailure = { error ->
@@ -238,6 +240,7 @@ class MainActivity : Activity() {
         username: String = "",
         connected: Boolean? = null,
         collection: String? = null,
+        collectionCount: Int? = null,
     ) {
         if (!webView.url.orEmpty().startsWith(REVIEW_ONCE_URL)) return
         val payload = JSONObject().apply {
@@ -246,6 +249,7 @@ class MainActivity : Activity() {
             if (username.isNotBlank()) put("username", username)
             if (connected != null) put("connected", connected)
             if (collection != null) put("collection", JSONTokener(collection).nextValue())
+            if (collectionCount != null) put("collectionCount", collectionCount)
         }
         webView.evaluateJavascript(
             "window.__reviewOnceNativeEvent && window.__reviewOnceNativeEvent(${JSONObject.quote(payload.toString())})",
