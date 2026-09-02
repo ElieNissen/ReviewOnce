@@ -3,12 +3,18 @@ package info.reviewonce.app
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.graphics.Color
 import android.os.Bundle
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.SafeBrowsingResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.FrameLayout
 import org.json.JSONObject
 import org.json.JSONTokener
 
@@ -17,6 +23,7 @@ class MainActivity : Activity() {
     private lateinit var collectionStore: LocalCollectionStore
     private lateinit var collectionImporter: LetterboxdCollectionImporter
     private lateinit var syncController: LetterboxdSyncController
+    private lateinit var cancelConnectionButton: Button
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private var connectingToLetterboxd = false
 
@@ -31,7 +38,7 @@ class MainActivity : Activity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.2.0"
+            settings.userAgentString = settings.userAgentString + " ReviewOnceAndroid/0.2.1"
             WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         }
         collectionImporter = LetterboxdCollectionImporter(
@@ -60,7 +67,7 @@ class MainActivity : Activity() {
                 if (uri.scheme == "reviewonce") {
                     when (uri.host) {
                         "session" -> sendSession()
-                        "connect" -> connectLetterboxd()
+                        "connect" -> connectLetterboxd(uri.getQueryParameter("username").orEmpty())
                         "refresh" -> refreshLocalCollection(uri.getQueryParameter("username").orEmpty())
                         "sync" -> handleSyncRequest()
                         "collection" -> sendLocalCollection()
@@ -74,7 +81,7 @@ class MainActivity : Activity() {
                 super.onPageFinished(view, url)
                 if (syncController.onPageFinished(url)) return
                 CookieManager.getInstance().flush()
-                if (url.startsWith(LETTERBOXD_URL)) detectLetterboxdAccount()
+                if (url.startsWith(LETTERBOXD_URL)) handleLetterboxdPage(url)
             }
 
             override fun onSafeBrowsingHit(
@@ -92,35 +99,79 @@ class MainActivity : Activity() {
             setAcceptThirdPartyCookies(webView, false)
         }
 
-        setContentView(webView)
-        webView.loadUrl(savedInstanceState?.getString(STATE_URL) ?: REVIEW_ONCE_URL)
+        cancelConnectionButton = Button(this).apply {
+            text = "Retour à ReviewOnce"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(35, 40, 45))
+            visibility = View.GONE
+            setOnClickListener { cancelLetterboxdConnection() }
+        }
+        val root = FrameLayout(this).apply {
+            addView(webView, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            addView(cancelConnectionButton, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(44),
+                Gravity.TOP or Gravity.END,
+            ).apply { setMargins(dp(8), dp(8), dp(8), 0) })
+        }
+        setContentView(root)
+        // Letterboxd is only a temporary authentication surface. Every app launch
+        // starts from ReviewOnce, even if Android killed the activity mid-login.
+        webView.loadUrl(REVIEW_ONCE_URL)
     }
 
-    private fun connectLetterboxd() {
+    private fun connectLetterboxd(usernameHint: String) {
         connectingToLetterboxd = true
+        if (usernameHint.isNotBlank()) {
+            preferences.edit().putString(PENDING_LETTERBOXD_USERNAME, usernameHint).apply()
+        }
+        cancelConnectionButton.visibility = View.VISIBLE
         webView.loadUrl(LETTERBOXD_SIGN_IN_URL)
     }
 
-    private fun detectLetterboxdAccount() {
-        webView.evaluateJavascript(DETECT_ACCOUNT_SCRIPT) { raw ->
+    private fun handleLetterboxdPage(url: String) {
+        if (!connectingToLetterboxd) return
+        cancelConnectionButton.visibility = View.VISIBLE
+        if (isSignInPage(url)) {
+            webView.evaluateJavascript(CAPTURE_LOGIN_USERNAME_SCRIPT, null)
+            return
+        }
+        webView.evaluateJavascript(READ_ACCOUNT_SCRIPT) { raw ->
             val username = decodeJavascriptString(raw)
+                .ifBlank { preferences.getString(PENDING_LETTERBOXD_USERNAME, "").orEmpty() }
             if (username.isBlank()) return@evaluateJavascript
-            preferences.edit().putString(LETTERBOXD_USERNAME, username).apply()
-            if (connectingToLetterboxd) {
-                connectingToLetterboxd = false
-                webView.loadUrl(REVIEW_ONCE_URL)
-                webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
-            }
+            preferences.edit()
+                .putString(LETTERBOXD_USERNAME, username)
+                .putBoolean(LETTERBOXD_CONNECTED, true)
+                .remove(PENDING_LETTERBOXD_USERNAME)
+                .apply()
+            connectingToLetterboxd = false
+            cancelConnectionButton.visibility = View.GONE
+            webView.loadUrl(REVIEW_ONCE_URL)
+            webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
         }
     }
 
+    private fun cancelLetterboxdConnection() {
+        connectingToLetterboxd = false
+        cancelConnectionButton.visibility = View.GONE
+        webView.loadUrl(REVIEW_ONCE_URL)
+        webView.postDelayed({ sendSession() }, CALLBACK_DELAY_MS)
+    }
+
+    private fun isSignInPage(url: String): Boolean =
+        url.contains("/sign-in", ignoreCase = true) || url.contains("/account/login", ignoreCase = true)
+
     private fun sendSession() {
         val username = preferences.getString(LETTERBOXD_USERNAME, "").orEmpty()
-        val hasCookies = !CookieManager.getInstance().getCookie(LETTERBOXD_URL).isNullOrBlank()
         sendNativeEvent(
             type = "session",
             username = username,
-            connected = hasCookies && username.isNotBlank(),
+            connected = preferences.getBoolean(LETTERBOXD_CONNECTED, false) && username.isNotBlank(),
         )
     }
 
@@ -205,11 +256,6 @@ class MainActivity : Activity() {
     private fun decodeJavascriptString(raw: String): String =
         runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull().orEmpty()
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        outState.putString(STATE_URL, webView.url ?: REVIEW_ONCE_URL)
-        super.onSaveInstanceState(outState)
-    }
-
     override fun onPause() {
         CookieManager.getInstance().flush()
         webView.onPause()
@@ -225,8 +271,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
         if (webView.url.orEmpty().startsWith(LETTERBOXD_URL)) {
-            connectingToLetterboxd = false
-            webView.loadUrl(REVIEW_ONCE_URL)
+            cancelLetterboxdConnection()
         } else if (webView.canGoBack()) {
             webView.goBack()
         } else {
@@ -245,16 +290,37 @@ class MainActivity : Activity() {
         private const val REVIEW_ONCE_URL = "https://senssync-films.hushed-plume-0999.chatgpt.site/"
         private const val LETTERBOXD_URL = "https://letterboxd.com/"
         private const val LETTERBOXD_SIGN_IN_URL = "https://letterboxd.com/sign-in/"
-        private const val STATE_URL = "current_url"
         private const val PREFERENCES = "reviewonce-local"
         private const val LETTERBOXD_USERNAME = "letterboxd-username"
+        private const val PENDING_LETTERBOXD_USERNAME = "pending-letterboxd-username"
+        private const val LETTERBOXD_CONNECTED = "letterboxd-connected"
         private const val CALLBACK_DELAY_MS = 900L
-        private val DETECT_ACCOUNT_SCRIPT = """
+        private val CAPTURE_LOGIN_USERNAME_SCRIPT = """
             (() => {
+              const input = document.querySelector(
+                'input[name="username"], input[autocomplete="username"], input#username'
+              );
+              if (!input || input.dataset.reviewOnceCapture === '1') return;
+              input.dataset.reviewOnceCapture = '1';
+              const save = () => {
+                const username = input.value.trim();
+                if (username) localStorage.setItem('reviewonce-login-username', username);
+              };
+              input.addEventListener('input', save);
+              input.addEventListener('change', save);
+              input.form?.addEventListener('submit', save, true);
+              save();
+            })()
+        """.trimIndent()
+        private val READ_ACCOUNT_SCRIPT = """
+            (() => {
+              const captured = localStorage.getItem('reviewonce-login-username');
+              if (captured) return captured;
               const selectors = [
                 '.navitem-profile a[href]',
                 'a[href$="/activity/"]',
-                'a[href$="/films/"][data-person]'
+                'a[href$="/films/"][data-person]',
+                'a[href*="/profile/"][href]'
               ];
               for (const selector of selectors) {
                 const link = document.querySelector(selector);
@@ -266,4 +332,6 @@ class MainActivity : Activity() {
             })()
         """.trimIndent()
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
